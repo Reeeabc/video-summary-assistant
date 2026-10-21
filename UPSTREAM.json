@@ -1,0 +1,46 @@
+{
+  "repository": "https://github.com/imexlovery/video-report-agent",
+  "commit": "d802f28cb2438021458fc070da7fec850b8ac569",
+  "files": [
+    {
+      "path": "vendor/video-report/SKILL.md",
+      "git_blob_sha1": "77abcd5af30702f6444fea31c1ac453cd81dda9a"
+    },
+    {
+      "path": "vendor/video-report/assets/brief-report-template.html",
+      "git_blob_sha1": "a2bedd180be6931bdef2cab878f55ba2d8f9d572"
+    },
+    {
+      "path": "vendor/video-report/assets/report-template.html",
+      "git_blob_sha1": "857edac55bf1edd7894254eb3be1e555316e6451"
+    },
+    {
+      "path": "vendor/video-report/modes/brief.md",
+      "git_blob_sha1": "950d4be08efbc00c408cba10958eae40cb7d9a83"
+    },
+    {
+      "path": "vendor/video-report/modes/standard.md",
+      "git_blob_sha1": "5616c38819e209975ba6bf44f46933c66fdd0a64"
+    },
+    {
+      "path": "vendor/video-report/references/argument.md",
+      "git_blob_sha1": "807b9297b86201eacd373ef84531627b3633603d"
+    },
+    {
+      "path": "vendor/video-report/references/evidence.md",
+      "git_blob_sha1": "3215f948d96270ad66cf57434ca0a91ab8c529aa"
+    },
+    {
+      "path": "vendor/video-report/references/mechanism.md",
+      "git_blob_sha1": "720a244db445d99f7868009e0b450d915c76b32f"
+    },
+    {
+      "path": "vendor/video-report/references/narrative.md",
+      "git_blob_sha1": "97004c32649d9ab81df7311e166ceebedc6d0901"
+    },
+    {
+      "path": "vendor/video-report/references/procedure.md",
+      "git_blob_sha1": "b118c6a3281c4f63d47c9c0171f3dd7c9dc4a00f"
+    }
+  ]
+}
