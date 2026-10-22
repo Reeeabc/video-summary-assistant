@@ -4,6 +4,8 @@
 
 本轮多平台扩展的完整样本与阶段见 [PLATFORMS.md](PLATFORMS.md)：B站独立音频回归通过，YouTube 代理 CONNECT 403，Vimeo web 客户端要求登录；两个新平台均未宣称取流或收费转写成功。旧成功/失败任务全部 24 个原有文件的校验和保持不变。
 
+字幕优先扩展见 CAPTIONS.md：平台字幕可用时不读百炼密钥、不获取音轨、不提交 ASR；无字幕才回退音频，阻断不自动回退。本轮字幕检查没有媒体下载、上传或新增 ASR；字幕回归前已有的 29 个运行文件校验和均未变化，原成功报告继续有效。
+
 ## 本轮固化
 
 - 默认 `bailian-upload`，300 分钟/1024 MiB；`direct-url` 仅手动选择，无自动回退。CLI、边界校验、使用规范、部署说明与测试同步。
@@ -14,8 +16,8 @@
 
 ## 实际检查
 
-- 62 项离线测试通过：包括详情 API 回退、BV/分 P 校验、证书配置、默认值与边界、成功复用、防重复计费、音频完整性/时长/解码、服务端上限、上传安全/清理、Markdown/HTML 一致性、来源及完整 ZIP；新增平台/ID、单视频边界、Opus 实际转换与 HLS/DASH 原生下载器离线组装解码。
-- 实际执行 bash setup.sh 成功：Python 3.12.14、FFmpeg/FFprobe 可用，系统 CA 路径有效且 TLS 验证开启；Deno 2.9.8 可运行，新增 EJS/HLS AES 依赖可用，pip check 无依赖冲突。shell 语法、Git 差异及 37 文件源码 ZIP 白名单检查通过，源码包无运行产物或音频。
+- 75 项离线测试通过：包括详情 API 回退、BV/分 P 校验、证书配置、默认值与边界、成功复用、防重复计费、音频完整性/时长/解码、服务端上限、上传安全/清理、Markdown/HTML 一致性、来源及完整 ZIP；新增平台/ID、单视频边界、Opus 实际转换与 HLS/DASH 原生下载器离线组装解码。
+- 实际执行 bash setup.sh 成功：Python 3.12.14、FFmpeg/FFprobe 可用，系统 CA 路径有效且 TLS 验证开启；Deno 2.9.8 可运行，新增 EJS/HLS AES 依赖可用，pip check 无依赖冲突。shell 语法、Git 差异及 41 文件源码 ZIP 白名单检查通过，源码包无运行产物或音频。
 - 默认 prepare 在无网络权限的执行中直接返回 BV1gmJX6SExT 的原 REPORT_VERIFIED 目录，沿用同一任务 ID；未提交新任务。41 个来源单元、3263 字符转写、41 段 SRT。
 - 文件名新增内容主题规则；支持显式 --title 或报告 H1，清理非法路径字符、限制长度，旧工作稿迁移后仍可检查与恢复。新增标题命名、重复交付和命名 ZIP 解压恢复回归验证。
 - 成功目录 deliver 生成完整 Markdown，37 个引用来源 ID 有效且与 HTML 一致，Markdown 与转换结果一致；新版 ZIP 含该 Markdown 与全部原始资料，CRC/逐文件检查通过。

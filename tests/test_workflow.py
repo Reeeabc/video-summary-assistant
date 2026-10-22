@@ -55,7 +55,9 @@ class WorkflowTests(unittest.TestCase):
                 args = called.call_args.args[0]
                 self.assertEqual(args.max_minutes, 300)
                 self.assertEqual(args.max_audio_mib, 1024)
-                if command == 'prepare': self.assertEqual(args.input_mode, 'bailian-upload')
+                if command == 'prepare':
+                    self.assertEqual(args.input_mode, 'bailian-upload')
+                    self.assertEqual(args.source_strategy, 'auto')
         with patch.object(app.sys, 'argv', ['video_assistant.py', 'prepare', 'BV1gmJX6SExT', '--input-mode', 'direct-url']), \
              patch.object(app, 'prepare') as called:
             app.main()

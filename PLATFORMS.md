@@ -19,6 +19,8 @@ YouTube：`Unable to download API page: <urlopen error Tunnel connection failed:
 
 Vimeo：`The web client only works when logged-in.`，这是当前固定版本 yt-dlp 的 web 客户端要求。它不能证明所有 Vimeo 视频都必须登录，也不能宣称本项目已完成 Vimeo 公开视频取流验收。本轮按要求停止，不读取浏览器或登录态。
 
+字幕优先策略与新增实测见 [CAPTIONS.md](CAPTIONS.md)。YouTube 字幕请求仍受代理 CONNECT 403 阻断；B站目标视频匿名目录为空，另一个上游字幕样本明确需登录。以上不改变此前音频验收结论。
+
 ## 实现与离线验证范围
 
 - platforms.py 显式校验单视频 URL、平台和 ID，输出含平台的目录标识；合集、频道、直播入口和未开放平台拒绝处理。旧 B站任务按规范链接识别复用，无需迁移或改写来源。

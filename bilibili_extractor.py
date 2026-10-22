@@ -67,6 +67,10 @@ class ProjectBiliBiliIE(BiliBiliIE):
                                     self._requested_bvid, default={})
         if isinstance(risk, dict) and risk.get('v_voucher'):
             raise ExtractionFailure('page', 'verification required; stopped')
+        return self._detail_state()
+
+    def _detail_state(self):
+        """Validated selected-part metadata, also usable without playback for captions."""
         detail = self._download_json(
             'https://api.bilibili.com/x/web-interface/wbi/view/detail', self._requested_bvid,
             query=self._sign_wbi({'bvid': self._requested_bvid, 'platform': 'web'}, self._requested_bvid),

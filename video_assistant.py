@@ -22,7 +22,8 @@ from urllib.parse import urlsplit
 
 import httpx
 from platforms import Problem, parse_video
-from report_delivery import DeliveryError, content_stem, markdown_source_ids, render_markdown, report_paths, write_archive
+from report_delivery import DeliveryError, content_stem, evidence_files, markdown_source_ids, render_markdown, report_paths, write_archive
+from captions import DEFAULT_LANGUAGES, fetch_captions
 from runtime_config import configure_ca
 
 ROOT = Path(__file__).resolve().parent
@@ -154,7 +155,7 @@ def export_sources(folder, state, raw):
             units.append({"id": f"S{len(units) + 1:05}", "start_ms": start if valid else None,
                           "end_ms": end if valid else None, "text": text})
     if not units:
-        raise Problem("百炼结果没有可用正文，保留原始结果供检查。")
+        raise Problem("来源没有可用正文，保留原始结果供检查。")
     write_json(folder / "source-units.json", units)
     text = "\n".join(u["text"] for u in units)
     (folder / "transcript.txt").write_text(text, encoding="utf-8")
@@ -167,11 +168,15 @@ def export_sources(folder, state, raw):
         md.append(f"[{unit['id']}]{times}\n{unit['text']}\n")
     (folder / "transcript.md").write_text("\n".join(md), encoding="utf-8")
     (folder / "transcript.srt").write_text("\n".join(srt), encoding="utf-8")
-    write_json(folder / "input.json", {**state["source"], "report_mode": state["report_mode"]})
+    write_json(folder / "input.json", {**state["source"], "report_mode": state["report_mode"],
+                                      "source_kind": state.get('source_kind', 'asr')})
     state.update(status="TRANSCRIPT_READY", source_units=len(units), text_characters=len(text),
                  transcript_sha256=hashlib.sha256(text.encode()).hexdigest(),
                  source_checksums={name: hashlib.sha256((folder / name).read_bytes()).hexdigest()
                                    for name in ("transcript.md", "transcript.txt", "source-units.json", "input.json")})
+    if state.get('source_kind') == 'platform_subtitles':
+        state['source_checksums'].update({n: hashlib.sha256((folder / n).read_bytes()).hexdigest()
+                                         for n in evidence_files(state)})
     write_json(folder / "state.json", state)
 
 
@@ -290,6 +295,33 @@ def stage_for_bailian(source, direct, media_headers, model, workspace, auth, sta
     return uri
 
 
+def caption_summary(result):
+    return {k: v for k, v in result.items() if k != 'raw'}
+
+
+def caption_raw(raw):
+    # Provider metadata is redacted; preserve the actual cue text for exact recovery.
+    return {**redact(raw), 'transcripts': raw['transcripts']}
+
+
+def caption_check(args):
+    ref = parse_video(args.url)
+    folder = (args.output or ROOT / 'runs' / (ref.identity + '-caption-check')).resolve()
+    with locked(folder):
+        path = folder / 'caption-check.json'
+        if path.exists() or (folder / 'state.json').exists():
+            raise Problem('目录已有任务或字幕检查证据；不覆盖、不自动重试。')
+        result = fetch_captions(ref, args.max_minutes, tuple(args.subtitle_langs.split(',')))
+        summary = {**caption_summary(result), 'video_url': ref.url, 'media_downloaded': False,
+                   'upload_submitted': False, 'transcription_submitted': False}
+        write_json(path, summary)
+        if result['status'] == 'available':
+            write_json(folder / 'caption-raw.json', caption_raw(result['raw']))
+        print(json.dumps({**summary, 'directory': str(folder)}, ensure_ascii=False))
+        if result['status'] == 'blocked':
+            raise Problem('字幕检查被阻断；未进入音频或收费转写：' + result['reason'])
+
+
 def audio_check(args):
     """No credentials, upload policy, or ASR: local audio acquisition and validation only."""
     from temporary_audio import AudioUploadError, prepared_audio
@@ -374,7 +406,7 @@ def existing_tasks(url, reuse_from=None):
 
 def intact_sources(folder, state):
     names = ('transcript.txt', 'transcript.md', 'transcript.srt', 'source-units.json', 'input.json',
-             'asr-task.json', 'asr-raw.json')
+             *evidence_files(state))
     try:
         if not all((folder / n).is_file() and not (folder / n).is_symlink() for n in names):
             return False
@@ -389,6 +421,11 @@ def intact_sources(folder, state):
 
 def reuse_success(tasks, folder, args):
     successes = [(p, s) for p, s in tasks if s.get('status') in {'TRANSCRIPT_READY', 'REPORT_VERIFIED'}]
+    strategy = getattr(args, 'source_strategy', 'auto')
+    if strategy == 'subtitles-only':
+        successes = [(p, s) for p, s in successes if s.get('source_kind') == 'platform_subtitles']
+    elif strategy == 'audio-only':
+        successes = [(p, s) for p, s in successes if s.get('source_kind') != 'platform_subtitles']
     valid = [(p, s) for p, s in successes if intact_sources(p, s)]
     if successes and not valid:
         raise Problem('已有成功任务的来源文件缺失或校验失败；请恢复资料，不自动重新计费。')
@@ -408,7 +445,7 @@ def reuse_success(tasks, folder, args):
     state = {**state, 'status': 'TRANSCRIPT_READY', 'report_mode': args.mode, 'reused_from': str(source_folder)}
     state.pop('report_files', None)
     state.pop('delivery_title', None)
-    for name in ('asr-task.json', 'asr-raw.json', 'transcript.txt', 'transcript.md',
+    for name in (*evidence_files(state), 'transcript.txt', 'transcript.md',
                  'transcript.srt', 'source-units.json', 'input.json'):
         shutil.copyfile(source_folder / name, folder / name)
     input_data = json.loads((folder / 'input.json').read_text())
@@ -423,7 +460,8 @@ def reuse_success(tasks, folder, args):
 
 def prepare(args):
     url, identity = canonical(args.url)
-    suffix = "-bailian-upload" if args.input_mode == "bailian-upload" else ""
+    strategy = getattr(args, 'source_strategy', 'auto')
+    suffix = '-subtitles' if strategy == 'subtitles-only' else ("-bailian-upload" if args.input_mode == "bailian-upload" else "")
     folder = (args.output or ROOT / "runs" / (identity + "-" + args.mode + suffix)).resolve()
     with locked(folder):
         path = folder / "state.json"
@@ -431,6 +469,9 @@ def prepare(args):
             state = json.loads(path.read_text())
             if state["source"]["video_url"] != url or state["report_mode"] != args.mode:
                 raise Problem("输出目录属于其他视频或模式，请使用独立目录。")
+            caption_source = state.get('source_kind') == 'platform_subtitles'
+            if (strategy == 'subtitles-only' and not caption_source) or (strategy == 'audio-only' and caption_source):
+                raise Problem('输出目录已有不同来源类型的任务；保留原任务，请使用独立 --output。')
             if state.get('status') in {'TRANSCRIPT_READY', 'REPORT_VERIFIED'} and not intact_sources(folder, state):
                 raise Problem('已有成功任务的来源校验失败；不自动重新计费。')
             return resume_locked(folder, state, args.wait_seconds)
@@ -438,12 +479,33 @@ def prepare(args):
         if reuse_success(tasks, folder, args):
             return
         for task_folder, old in tasks:
+            if old.get('status') in {'TRANSCRIPT_READY', 'REPORT_VERIFIED'}:
+                continue
             if old.get('status') == 'SUBMISSION_UNKNOWN':
                 raise Problem(f'已有提交结果未知的任务：{task_folder}；先核实并绑定原任务，不得自动重提。')
             if old.get('task_id') and old.get('status') not in {'ASR_FAILED', 'SUBMIT_REJECTED'}:
                 raise Problem(f'已有任务待查询：{task_folder}；请用 resume，不另建任务。')
-            if old.get('status') in {'ASR_FAILED', 'SUBMIT_REJECTED', 'AUDIO_STAGING'} and not getattr(args, 'new_attempt', False):
+            if (old.get('status') in {'ASR_FAILED', 'SUBMIT_REJECTED', 'AUDIO_STAGING'}
+                    and not getattr(args, 'new_attempt', False) and strategy != 'subtitles-only'):
                 raise Problem('已有失败或中断任务；须明确授权后用独立 --output 和 --new-attempt，不自动另建收费任务。')
+        if strategy != 'audio-only':
+            result = fetch_captions(parse_video(url), args.max_minutes,
+                                    tuple(getattr(args, 'subtitle_langs', ','.join(DEFAULT_LANGUAGES)).split(',')))
+            write_json(folder / 'caption-check.json', {**caption_summary(result), 'transcription_submitted': False})
+            if result['status'] == 'available':
+                state = {'source': result['source'], 'report_mode': args.mode,
+                         'source_kind': 'platform_subtitles', 'source_strategy': strategy,
+                         'status': 'SOURCE_EXPORT_PENDING'}
+                write_json(folder / 'caption-raw.json', caption_raw(result['raw']))
+                write_json(path, state)
+                export_sources(folder, state, result['raw'])
+                print(json.dumps({'status': 'TRANSCRIPT_READY', 'source_kind': 'platform_subtitles',
+                                  'directory': str(folder), 'transcription_submitted': False}, ensure_ascii=False))
+                return
+            if result['status'] == 'blocked':
+                raise Problem('字幕请求被阻断，未自动进入收费转写：' + result['reason'])
+            if strategy == 'subtitles-only':
+                raise Problem('无可用平台字幕；subtitles-only 禁止音频下载和收费转写。')
         headers = credentials()
         model = os.environ.get("ASR_MODEL", "qwen-audio-3.1-asr-flash-filetrans")
         if model not in MODELS:
@@ -455,7 +517,7 @@ def prepare(args):
         if args.input_mode == 'direct-url':
             direct = direct_url(direct)
         state = {"source": source, "report_mode": args.mode, "workspace": workspace, "model": model,
-                 "input_mode": args.input_mode}
+                 "input_mode": args.input_mode, "source_kind": "asr", "source_strategy": strategy}
         if args.input_mode == "bailian-upload":
             state["status"] = "AUDIO_STAGING"
             write_json(path, state)
@@ -469,9 +531,16 @@ def prepare(args):
 
 def resume_locked(folder, state, wait_seconds):
     if state.get("status") in {"TRANSCRIPT_READY", "REPORT_VERIFIED"}:
-        if not all((folder / name).is_file() for name in ("transcript.md", "source-units.json", "input.json")):
-            export_sources(folder, state, json.loads((folder / "asr-raw.json").read_text()))
+        if not all((folder / name).is_file() for name in ("transcript.md", "transcript.txt", "transcript.srt", "source-units.json", "input.json")):
+            raw_name = 'caption-raw.json' if state.get('source_kind') == 'platform_subtitles' else 'asr-raw.json'
+            export_sources(folder, state, json.loads((folder / raw_name).read_text()))
         print(json.dumps({"status": state["status"], "directory": str(folder)}, ensure_ascii=False))
+        return
+    if state.get('source_kind') == 'platform_subtitles':
+        raw_path = folder / 'caption-raw.json'
+        if not raw_path.is_file():
+            raise Problem('平台字幕原始资料缺失；请恢复资料，不自动转为收费 ASR。')
+        export_sources(folder, state, json.loads(raw_path.read_text()))
         return
     if (folder / "asr-raw.json").exists():
         export_sources(folder, state, json.loads((folder / "asr-raw.json").read_text()))
@@ -551,8 +620,9 @@ def deliver(folder, title=None):
         html = old_html.read_text(encoding='utf-8')
         chosen_title = title if title is not None else state.get('delivery_title')
         stem = content_stem(html, state['source'], chosen_title, state['report_mode'])
+        text_suffix = '_原始字幕.txt' if state.get('source_kind') == 'platform_subtitles' else '_原始转写.txt'
         files = {'html': stem + '.html', 'markdown': stem + '.md',
-                 'subtitles': stem + '_字幕.srt', 'text': stem + '_原始转写.txt'}
+                 'subtitles': stem + '_字幕.srt', 'text': stem + text_suffix}
         if any((folder / n).is_symlink() for n in files.values()):
             raise DeliveryError('交付文件不能为符号链接。')
         new_html, new_markdown = folder / files['html'], folder / files['markdown']
@@ -583,7 +653,7 @@ def main():
     configure_ca()
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
-    p = commands.add_parser("prepare", help="默认下载验证独立音频并临时上传，提交一次转写，保存报告来源")
+    p = commands.add_parser("prepare", help="优先直接获取平台字幕；确认不可用时才准备音频并提交一次转写")
     p.add_argument("url")
     p.add_argument("--mode", choices=["standard", "brief"], default="standard")
     p.add_argument("--output", type=Path)
@@ -593,6 +663,14 @@ def main():
     p.add_argument("--max-audio-mib", type=int, default=DEFAULT_AUDIO_MIB)
     p.add_argument('--reuse-from', type=Path, help='优先复用已导入的成功任务目录')
     p.add_argument('--new-attempt', action='store_true', help='仅在明确授权重试后使用；未知提交仍禁止重提')
+    p.add_argument('--source-strategy', choices=['auto', 'subtitles-only', 'audio-only'], default='auto',
+                   help='默认字幕优先；字幕可用则不下载音频、不调用 ASR')
+    p.add_argument('--subtitle-langs', default=','.join(DEFAULT_LANGUAGES), help='字幕语言优先级，逗号分隔；人工字幕优先')
+    p = commands.add_parser('caption-check', help='仅检查并获取平台字幕，不下载媒体、不上传、不调用 ASR')
+    p.add_argument('url')
+    p.add_argument('--output', type=Path)
+    p.add_argument('--max-minutes', type=int, default=DEFAULT_MAX_MINUTES)
+    p.add_argument('--subtitle-langs', default=','.join(DEFAULT_LANGUAGES))
     p = commands.add_parser('audio-check', help='仅解析、下载独立音频并完整解码验证，不上传、不提交 ASR')
     p.add_argument('url')
     p.add_argument('--output', type=Path)
@@ -627,6 +705,8 @@ def main():
         prepare(args)
     elif args.command == 'audio-check':
         audio_check(args)
+    elif args.command == 'caption-check':
+        caption_check(args)
     elif args.command == "upload-check":
         upload_check(args)
     elif args.command == "probe":

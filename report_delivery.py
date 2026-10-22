@@ -2,6 +2,7 @@
 from dataclasses import dataclass, field
 from html import escape
 from html.parser import HTMLParser
+import json
 import re
 import unicodedata
 import zipfile
@@ -224,11 +225,18 @@ def content_stem(html, source, title=None, mode='standard'):
 
 
 REQUIRED_FILES = ('transcript.srt', 'transcript.txt', 'transcript.md',
-                  'input.json', 'source-units.json', 'state.json', 'asr-task.json', 'asr-raw.json', 'report-check.json')
+                  'input.json', 'source-units.json', 'state.json', 'report-check.json')
+
+
+def evidence_files(state):
+    if state.get('source_kind') == 'platform_subtitles':
+        return ('caption-raw.json', 'caption-check.json')
+    return ('asr-task.json', 'asr-raw.json') + (('caption-check.json',) if state.get('source_strategy') == 'auto' else ())
 
 
 def write_archive(folder, name, report_files):
-    required = (*REQUIRED_FILES, *report_files.values())
+    state = json.loads((folder / 'state.json').read_text())
+    required = (*REQUIRED_FILES, *evidence_files(state), *report_files.values())
     if any(not (folder / item).is_file() or (folder / item).is_symlink() for item in required):
         raise DeliveryError('下载包缺少正式报告或必需的原始资料。')
     names = list(dict.fromkeys(required)) + [n for n in ('review.json',) if (folder / n).is_file()]
