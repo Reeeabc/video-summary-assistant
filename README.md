@@ -33,9 +33,9 @@ bash setup.sh
 .venv/bin/python video_assistant.py prepare 'BV1gmJX6SExT' --mode standard
 # 以下命令使用输出的 directory，不能假定任务路径
 .venv/bin/python video_assistant.py resume '任务目录'
-# Codex 写好 report.html 后生成完整 report.md、检查并打包
-.venv/bin/python video_assistant.py deliver '任务目录'
-# 重新检查完整交付（要求已有 report.md）
+# Codex 写好工作稿后，按正文主题命名、生成完整 Markdown、检查并打包
+.venv/bin/python video_assistant.py deliver '任务目录' --title '存储芯片的堆叠、键合与国产追赶路径'
+# 重新检查完整交付（自动使用状态中保存的报告文件名）
 .venv/bin/python video_assistant.py verify '任务目录'
 ```
 
@@ -69,12 +69,14 @@ bash setup.sh
 
 | 文件 | 用途 |
 | --- | --- |
-| `report.html` | 项目模板生成的阅读报告 |
-| `report.md` | 对应 HTML 的完整阅读报告，含章节、必要表格、时间范围、图示文字和来源标记 |
-| `transcript.srt` | 完整字幕 |
-| `<BV>-p<分P>-<模式>-report.zip` | 全部报告与原始资料下载包 |
+| `内容主题_精读.html` | 项目模板生成的阅读报告 |
+| `内容主题_精读.md` | 对应 HTML 的完整阅读报告，含章节、必要表格、时间范围、图示文字和来源标记 |
+| `内容主题_精读_字幕.srt` | 完整字幕 |
+| `内容主题_精读_完整资料.zip` | 全部报告与原始资料下载包 |
 
-ZIP 还包含原始 `transcript.txt`、`transcript.md`、`input.json`、`source-units.json`、`state.json`、`asr-task.json`、脱敏 `asr-raw.json`、`report-check.json` 和可用的 `review.json`。**`report.md` 是阅读报告，`transcript.md` 是原始转写**，不能互相代替。
+`deliver --title` 接受根据正文提炼的简洁主题；未指定时优先使用报告 H1，再使用视频标题，拒绝 report 等通用标题。文件名清理路径字符并限制长度，brief 使用 `_速览`；TXT 命名为 `内容主题_精读_原始转写.txt`。迁移旧 report 工作稿后，后续 verify/deliver 从 state 中读取实际名称，ZIP 解压后仍可恢复任务。
+
+ZIP 还包含原始 `transcript.txt`、`transcript.md`、`input.json`、`source-units.json`、`state.json`、`asr-task.json`、脱敏 `asr-raw.json`、`report-check.json` 和可用的 `review.json`。**主题命名的 Markdown 是阅读报告，`transcript.md` 是原始转写**，不能互相代替。
 
 `deliver` 检查 Markdown 实际存在且对应 HTML、来源 ID 有效，再逐字节检查归档内容。内容仍须人工核对来源；浏览器视觉验收无法完成时写入 `review.json`，继续静态检查和交付，不声称视觉验收通过。
 

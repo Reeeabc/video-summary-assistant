@@ -36,7 +36,7 @@ class WorkflowTests(unittest.TestCase):
 
     def html(self, source_id='S00001'):
         return ('<!doctype html><html><head><title>报告</title><style>p{color:#333}</style></head><body>'
-            '<main><header><h1>完整报告</h1><p>' + URL + '</p></header>'
+            '<main><header><h1>芯片连接方式与带宽瓶颈</h1><p>' + URL + '</p></header>'
             '<section><h2><span class="num">1</span><span class="section-title">关系与条件</span>'
             '<span class="section-time">00:01–00:05</span></h2>'
             f'<p data-source-units="{source_id}">' + '完整解释' * 250 + '</p>'
@@ -101,6 +101,8 @@ class WorkflowTests(unittest.TestCase):
             root = Path(td)
             original = root / 'runs' / 'old'
             self.successful_task(original)
+            (original / 'report.html').write_text(self.html())
+            app.deliver(original, title='原模式内容主题')
             before = (original / 'transcript.md').read_bytes()
             target = root / 'runs' / 'brief'
             with patch.object(app, 'ROOT', root), patch.object(app, 'credentials', side_effect=AssertionError('no ASR')):
@@ -108,6 +110,11 @@ class WorkflowTests(unittest.TestCase):
             self.assertEqual((target / 'transcript.md').read_bytes(), before)
             self.assertEqual(json.loads((target / 'input.json').read_text())['report_mode'], 'brief')
             self.assertEqual(json.loads((target / 'state.json').read_text())['task_id'], 'saved-task')
+            self.assertNotIn('report_files', json.loads((target / 'state.json').read_text()))
+            (target / 'report.html').write_text(self.html())
+            app.deliver(target)
+            self.assertEqual(json.loads((target / 'state.json').read_text())['report_files']['html'],
+                             '芯片连接方式与带宽瓶颈_速览.html')
 
     def test_failed_and_unknown_tasks_do_not_trigger_new_charge_or_fallback(self):
         for status in ('ASR_FAILED', 'SUBMISSION_UNKNOWN'):
@@ -159,14 +166,49 @@ class WorkflowTests(unittest.TestCase):
             (folder / 'report.html').write_text(html)
             transcript_hash = hashlib.sha256((folder / 'transcript.md').read_bytes()).hexdigest()
             app.deliver(folder)
-            self.assertEqual((folder / 'report.md').read_text(), delivery.render_markdown(html))
+            state = json.loads((folder / 'state.json').read_text())
+            files = state['report_files']
+            self.assertEqual(files['html'], '芯片连接方式与带宽瓶颈_精读.html')
+            self.assertEqual((folder / files['markdown']).read_text(), delivery.render_markdown(html))
+            self.assertFalse((folder / 'report.html').exists())
+            self.assertFalse((folder / 'report.md').exists())
             app.verify(folder)
             with zipfile.ZipFile(next(folder.glob('*.zip'))) as z:
-                self.assertIn('report.md', z.namelist())
+                self.assertIn(files['markdown'], z.namelist())
+                self.assertNotIn('report.html', z.namelist())
+                self.assertNotIn('report.md', z.namelist())
                 self.assertIn('transcript.md', z.namelist())
-                self.assertEqual(z.read('report.md'), (folder / 'report.md').read_bytes())
+                self.assertEqual(z.read(files['markdown']), (folder / files['markdown']).read_bytes())
+                self.assertEqual(z.read(files['subtitles']), z.read('transcript.srt'))
                 self.assertIsNone(z.testzip())
+                restored = folder / 'restored'
+                z.extractall(restored)
+            app.verify(restored)
+            self.assertTrue(app.intact_sources(restored, json.loads((restored / 'state.json').read_text())))
+            app.deliver(restored)
             self.assertEqual(hashlib.sha256((folder / 'transcript.md').read_bytes()).hexdigest(), transcript_hash)
+
+    def test_content_names_use_meaningful_titles_and_safe_paths(self):
+        self.assertEqual(delivery.content_stem(self.html(), {}), '芯片连接方式与带宽瓶颈_精读')
+        self.assertEqual(delivery.content_stem(self.html(), {}, '../../存储:堆叠/键合?\n', 'brief'), '存储-堆叠-键合_速览')
+        generic = self.html().replace('芯片连接方式与带宽瓶颈', 'report')
+        self.assertEqual(delivery.content_stem(generic, {'video_title': '存储技术的演进'}), '存储技术的演进_精读')
+        with self.assertRaises(delivery.DeliveryError): delivery.content_stem(generic, {})
+        self.assertLess(len(delivery.content_stem(self.html(), {}, '芯片' * 200).encode()), 200)
+
+    def test_explicit_content_title_is_persisted_for_redelivery(self):
+        with tempfile.TemporaryDirectory() as td:
+            folder = Path(td)
+            self.successful_task(folder)
+            (folder / 'report.html').write_text(self.html())
+            app.deliver(folder, title='存储芯片的堆叠与键合')
+            state = json.loads((folder / 'state.json').read_text())
+            self.assertEqual(state['report_files']['html'], '存储芯片的堆叠与键合_精读.html')
+            app.deliver(folder)
+            self.assertEqual(json.loads((folder / 'state.json').read_text())['report_files'], state['report_files'])
+            app.deliver(folder, title='芯片连接如何影响带宽')
+            self.assertFalse((folder / state['report_files']['html']).exists())
+            app.verify(folder)
 
     def test_missing_stale_or_fabricated_markdown_fails_verification(self):
         with tempfile.TemporaryDirectory() as td:

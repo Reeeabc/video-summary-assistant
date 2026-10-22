@@ -3,6 +3,7 @@ from dataclasses import dataclass, field
 from html import escape
 from html.parser import HTMLParser
 import re
+import unicodedata
 import zipfile
 
 
@@ -193,14 +194,44 @@ def markdown_source_ids(markdown):
             for value in re.split(r'[,;\s]+', group) if value}
 
 
-REQUIRED_FILES = ('report.html', 'report.md', 'transcript.srt', 'transcript.txt', 'transcript.md',
+def report_paths(folder, state):
+    files = state.get('report_files', {'html': 'report.html', 'markdown': 'report.md'})
+    paths = []
+    for key, suffix in (('html', '.html'), ('markdown', '.md')):
+        name = files.get(key)
+        if (not isinstance(name, str) or not name.endswith(suffix) or '/' in name or '\\' in name
+                or (folder / name).is_symlink()):
+            raise DeliveryError('报告文件名无效或为符号链接。')
+        paths.append(folder / name)
+    return paths
+
+
+def content_stem(html, source, title=None, mode='standard'):
+    doc = Document(html)
+    heading = next(nodes(doc.root, 'h1'), None)
+    candidates = [title] if title is not None else [text(heading) if heading else '', source.get('video_title', '')]
+    for candidate in candidates:
+        name = unicodedata.normalize('NFKC', str(candidate or ''))
+        name = ''.join(c for c in name if not unicodedata.category(c).startswith('C'))
+        name = re.sub(r'[<>:"/\\|?*]+', '-', name)
+        name = re.sub(r'\s+', ' ', name).strip(' .-')
+        while len(name.encode('utf-8')) > 160:
+            name = name[:-1]
+        name = name.rstrip(' .-')
+        if name and name.casefold() not in {'report', '报告', '完整报告', '视频报告', '视频总结', '总结', '阅读报告'}:
+            return name + ('_速览' if mode == 'brief' else '_精读')
+    raise DeliveryError('请根据正文拟定简洁主题标题，使用 deliver --title 内容标题。')
+
+
+REQUIRED_FILES = ('transcript.srt', 'transcript.txt', 'transcript.md',
                   'input.json', 'source-units.json', 'state.json', 'asr-task.json', 'asr-raw.json', 'report-check.json')
 
 
-def write_archive(folder, name):
-    if any(not (folder / item).is_file() or (folder / item).is_symlink() for item in REQUIRED_FILES):
+def write_archive(folder, name, report_files):
+    required = (*REQUIRED_FILES, *report_files.values())
+    if any(not (folder / item).is_file() or (folder / item).is_symlink() for item in required):
         raise DeliveryError('下载包缺少正式报告或必需的原始资料。')
-    names = list(REQUIRED_FILES) + [n for n in ('review.json',) if (folder / n).is_file()]
+    names = list(dict.fromkeys(required)) + [n for n in ('review.json',) if (folder / n).is_file()]
     if any((folder / item).is_symlink() for item in names):
         raise DeliveryError('下载包不能包含符号链接。')
     destination = folder / name

@@ -21,7 +21,7 @@ import time
 from urllib.parse import parse_qs, urlsplit
 
 import httpx
-from report_delivery import DeliveryError, markdown_source_ids, render_markdown, write_archive
+from report_delivery import DeliveryError, content_stem, markdown_source_ids, render_markdown, report_paths, write_archive
 from runtime_config import configure_ca
 
 ROOT = Path(__file__).resolve().parent
@@ -426,6 +426,8 @@ def reuse_success(tasks, folder, args):
         return True
     # ASR is independent of reading mode. Create new report sources, never a new task.
     state = {**state, 'status': 'TRANSCRIPT_READY', 'report_mode': args.mode, 'reused_from': str(source_folder)}
+    state.pop('report_files', None)
+    state.pop('delivery_title', None)
     for name in ('asr-task.json', 'asr-raw.json', 'transcript.txt', 'transcript.md',
                  'transcript.srt', 'source-units.json', 'input.json'):
         shutil.copyfile(source_folder / name, folder / name)
@@ -519,7 +521,11 @@ def verify(folder):
     state = json.loads((folder / "state.json").read_text())
     if state.get("status") not in {"TRANSCRIPT_READY", "REPORT_VERIFIED"}:
         raise Problem("转写尚未完成。")
-    html = (folder / "report.html").read_text(encoding="utf-8")
+    try:
+        html_path, markdown_path = report_paths(folder, state)
+    except DeliveryError as exc:
+        raise Problem(str(exc)) from None
+    html = html_path.read_text(encoding="utf-8")
     parsed = ReportParser()
     parsed.feed(html)
     units = json.loads((folder / "source-units.json").read_text())
@@ -535,9 +541,9 @@ def verify(folder):
             or not parsed.source_ids or not parsed.source_ids <= known
             or state["source"]["video_url"] not in html):
         raise Problem("HTML 静态检查失败：检查来源 ID、完整来源链接、占位符及外部资源。")
-    if not (folder / 'report.md').is_file():
-        raise Problem('缺少完整 Markdown 报告 report.md；运行 deliver 生成并打包。')
-    markdown = (folder / 'report.md').read_text(encoding='utf-8')
+    if not markdown_path.is_file():
+        raise Problem('缺少完整 Markdown 阅读报告；运行 deliver 生成并打包。')
+    markdown = markdown_path.read_text(encoding='utf-8')
     try:
         expected = render_markdown(html)
     except DeliveryError as exc:
@@ -556,18 +562,39 @@ def verify(folder):
     print(json.dumps(check, ensure_ascii=False))
 
 
-def deliver(folder):
+def deliver(folder, title=None):
     try:
-        html = (folder / 'report.html').read_text(encoding='utf-8')
-        (folder / 'report.md').write_text(render_markdown(html), encoding='utf-8')
-        verify(folder)
         state = json.loads((folder / 'state.json').read_text())
-        _, identity = canonical(state['source']['video_url'])
-        archive = write_archive(folder, identity + '-' + state['report_mode'] + '-report.zip')
+        old_html, old_markdown = report_paths(folder, state)
+        html = old_html.read_text(encoding='utf-8')
+        chosen_title = title if title is not None else state.get('delivery_title')
+        stem = content_stem(html, state['source'], chosen_title, state['report_mode'])
+        files = {'html': stem + '.html', 'markdown': stem + '.md',
+                 'subtitles': stem + '_字幕.srt', 'text': stem + '_原始转写.txt'}
+        if any((folder / n).is_symlink() for n in files.values()):
+            raise DeliveryError('交付文件不能为符号链接。')
+        new_html, new_markdown = folder / files['html'], folder / files['markdown']
+        if new_html != old_html:
+            if new_html.exists() and new_html.read_bytes() != old_html.read_bytes():
+                raise DeliveryError('内容标题与已有不同报告重名，请指定其他 --title。')
+            shutil.copyfile(old_html, new_html)
+        new_markdown.write_text(render_markdown(html), encoding='utf-8')
+        state['report_files'] = files
+        if chosen_title is not None:
+            state['delivery_title'] = chosen_title
+        write_json(folder / 'state.json', state)
+        verify(folder)
+        for old, new in ((old_html, new_html), (old_markdown, new_markdown)):
+            if old != new:
+                old.unlink(missing_ok=True)
+        shutil.copyfile(folder / 'transcript.srt', folder / files['subtitles'])
+        shutil.copyfile(folder / 'transcript.txt', folder / files['text'])
+        archive = write_archive(folder, stem + '_完整资料.zip', files)
     except DeliveryError as exc:
         raise Problem(str(exc)) from None
     print(json.dumps({'delivery': 'ready', 'archive': str(archive),
-        'primary_files': ['report.html', 'report.md', 'transcript.srt', archive.name]}, ensure_ascii=False))
+        'directory': str(folder), 'primary_files': [files['html'], files['markdown'], files['subtitles'], archive.name],
+        'text_file': files['text']}, ensure_ascii=False))
 
 
 def main():
@@ -598,6 +625,8 @@ def main():
         p.add_argument("folder", type=Path)
         if name == "resume":
             p.add_argument("--wait-seconds", type=int, default=900)
+        if name == 'deliver':
+            p.add_argument('--title', help='根据报告内容拟定的简洁主题标题，用作交付文件名')
         if name == "attach-task":
             p.add_argument("task_id", help="用户从百炼控制台核实后的原任务 ID")
     args = parser.parse_args()
@@ -631,7 +660,7 @@ def main():
             elif args.command == "verify":
                 verify(args.folder)
             elif args.command == 'deliver':
-                deliver(args.folder)
+                deliver(args.folder, args.title)
             elif args.command == "attach-task":
                 if state.get("task_id") or not re.fullmatch(r"[A-Za-z0-9_-]+", args.task_id):
                     raise Problem("已有任务 ID 或新 ID 格式无效，未修改。")
