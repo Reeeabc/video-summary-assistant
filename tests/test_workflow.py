@@ -142,11 +142,50 @@ class WorkflowTests(unittest.TestCase):
             self.assertEqual(calls, ['direct-task', 'upload-task'])
 
     def test_direct_success_does_not_download_or_upload(self):
-        with self.fallback_scenario(direct_status='SUCCEEDED') as (folder, args, calls, resolve, staged):
+        with self.fallback_scenario(direct_status='SUCCEEDED') as (folder, args, calls, resolve, staged), \
+             patch.object(app, 'check_public_audio', side_effect=AssertionError('worker probe cannot gate provider access')) as probe:
             app.prepare(args)
             self.assertEqual(calls, ['direct-task'])
             staged.assert_not_called()
             self.assertEqual(resolve.call_count, 1)
+            probe.assert_not_called()
+
+    def test_selected_audio_format_is_frozen_for_one_upload_fallback(self):
+        with self.fallback_scenario() as (folder, args, calls, resolve, staged):
+            args.bilibili_audio_format = '30216'
+            app.prepare(args)
+            state = json.loads((folder/'state.json').read_text())
+            self.assertEqual(state['bilibili_audio_format'], '30216')
+            self.assertEqual(calls, ['direct-task', 'upload-task'])
+            self.assertEqual([call.kwargs['bilibili_audio_format'] for call in resolve.call_args_list],
+                             ['30216', '30216'])
+            staged.assert_called_once()
+
+    def test_explicit_direct_only_attempt_never_creates_a_second_paid_task(self):
+        with self.fallback_scenario() as (folder,args,calls,resolve,staged):
+            args.no_upload_fallback=True
+            with self.assertRaises(app.Problem): app.prepare(args)
+            state=json.loads((folder/'state.json').read_text())
+            self.assertFalse(state['upload_fallback_allowed'])
+            self.assertFalse(app.can_upload_fallback(state))
+            self.assertEqual(calls,['direct-task'])
+            staged.assert_not_called()
+
+    def test_legacy_blocked_or_interrupted_preflight_is_not_automatically_retried(self):
+        for status in ('DIRECT_URL_BLOCKED', 'DIRECT_URL_CHECKING'):
+            with self.subTest(status=status), self.fallback_scenario() as (folder, args, calls, resolve, staged):
+                state = {'status':status, 'source':{'video_url':URL}, 'report_mode':'standard',
+                         'input_mode':'direct-url', 'upload_fallback_allowed':True}
+                folder.mkdir(parents=True)
+                app.write_json(folder/'state.json', state)
+                self.assertFalse(app.can_upload_fallback(state))
+                for retry in (lambda: app.prepare(args), lambda: app.resume_locked(folder, state, 1),
+                              lambda: app.prepare(self.arguments(input_mode='direct-url', source_strategy='audio-only',
+                                  output=folder.parent/'other'))):
+                    with self.assertRaises(app.Problem): retry()
+                resolve.assert_not_called()
+                staged.assert_not_called()
+                self.assertEqual(calls, [])
 
     def test_unknown_submission_or_query_failure_never_triggers_fallback(self):
         for failure in ('direct-task', 'query', 'reject', 'result'):

@@ -20,6 +20,7 @@ import uuid
 
 import httpx
 from runtime_config import configure_ca
+from media_http import response_evidence
 
 
 class AudioUploadError(Exception):
@@ -28,36 +29,114 @@ class AudioUploadError(Exception):
         super().__init__(json.dumps(self.details, ensure_ascii=False))
 
 
+DOWNLOAD_CHUNK_BYTES = 1024 * 1024
+
+
 def download_audio(client, url, headers, path, max_bytes):
     allowed = {"user-agent", "referer", "origin", "accept", "accept-language", "sec-fetch-mode"}
     request_headers = {k.lower(): v for k, v in headers.items() if k.lower() in allowed and isinstance(v, str)}
     request_headers['accept-encoding'] = 'identity'
+    request_headers['cache-control'] = 'no-cache'
+    request_headers['pragma'] = 'no-cache'
+    # Reusing a proxy/CDN connection can stall later range bodies despite valid 206 headers.
+    request_headers['connection'] = 'close'
     digest, md5, size = hashlib.sha256(), hashlib.md5(), 0
+    chunk_bytes = DOWNLOAD_CHUNK_BYTES
+    network_retries = 0
+    total, validator, file, requests = None, None, None, 0
     try:
-        with client.stream('GET', url, headers=request_headers) as response:
-            if response.status_code != 200:
-                raise AudioUploadError('download', 'full audio request rejected', http_status=response.status_code)
-            length = response.headers.get('content-length', '')
-            if not length.isdecimal() or not 0 < int(length) <= max_bytes:
-                raise AudioUploadError('download', 'missing or excessive Content-Length')
-            if response.headers.get('content-encoding', 'identity') != 'identity':
-                raise AudioUploadError('download', 'unexpected transfer encoding')
-            if response.headers.get('content-type', '').split(';')[0].lower() not in {
-                    'audio/mp4', 'video/mp4', 'application/octet-stream'}:
-                raise AudioUploadError('download', 'unexpected media content type')
-            with path.open('xb') as file:
-                for chunk in response.iter_raw(chunk_size=65536):
-                    size += len(chunk)
-                    if size > int(length) or size > max_bytes:
-                        raise AudioUploadError('download', 'audio exceeds declared or configured size')
-                    file.write(chunk)
-                    digest.update(chunk)
-                    md5.update(chunk)
-            if size != int(length):
-                raise AudioUploadError('download', 'truncated audio response')
-    except httpx.HTTPError:
-        raise AudioUploadError('download', 'network or TLS failure; not retried') from None
-    return {'bytes': size, 'sha256': digest.hexdigest(), 'md5': md5.hexdigest(), 'content_length_verified': True}
+        while total is None or size < total:
+            # Learn size with a small request; use small tail ranges because some CDN/proxy
+            # combinations terminate a large EOF response early while the same bytes are readable.
+            if total is None:
+                span = min(chunk_bytes, 32768)
+            elif total - size <= chunk_bytes + 1024 * 1024:
+                span = min(chunk_bytes, 16384)
+            else:
+                span = chunk_bytes
+            end = min(size + span, total or max_bytes) - 1
+            part_headers = dict(request_headers)
+            part_headers['range'] = f'bytes={size}-{end}'
+            chunk_retries = 0
+            while True:
+                checkpoint, saved_digest, saved_md5 = size, digest.copy(), md5.copy()
+                response_status = None
+                try:
+                    with client.stream('GET', url, headers=part_headers) as response:
+                        requests += 1
+                        response_status = response.status_code
+                        if response.status_code not in {200, 206}:
+                            raise AudioUploadError('download', 'full audio request rejected', **response_evidence(response))
+                        length = response.headers.get('content-length', '')
+                        if not re.fullmatch(r'[0-9]{1,15}', length) or not 0 < int(length) <= max_bytes:
+                            raise AudioUploadError('download', 'missing or excessive Content-Length')
+                        length = int(length)
+                        if response.status_code == 206:
+                            match = re.fullmatch(r'bytes ([0-9]{1,15})-([0-9]{1,15})/([0-9]{1,15})',
+                                                 response.headers.get('content-range', ''))
+                            if not match:
+                                raise AudioUploadError('download', 'invalid Content-Range')
+                            start, last, resource_size = map(int, match.groups())
+                            if (not 0 < resource_size <= max_bytes or start != size
+                                    or last != min(end, resource_size - 1) or last < start
+                                    or length != last - start + 1 or total not in (None, resource_size)):
+                                raise AudioUploadError('download', 'inconsistent or incomplete audio range')
+                        else:
+                            # Servers may ignore the first Range and return the whole resource.
+                            # Never append a full response to a partially downloaded file.
+                            if size or response.headers.get('content-range'):
+                                raise AudioUploadError('download', 'unexpected full response during range download')
+                            resource_size = length
+                        if response.headers.get('content-encoding', 'identity') != 'identity':
+                            raise AudioUploadError('download', 'unexpected transfer encoding')
+                        if response.headers.get('content-type', '').split(';')[0].lower() not in {
+                                'audio/mp4', 'video/mp4', 'application/octet-stream'}:
+                            raise AudioUploadError('download', 'unexpected media content type', **response_evidence(response))
+                        etag = response.headers.get('etag', '')
+                        if validator and etag != validator:
+                            raise AudioUploadError('download', 'audio changed between ranges')
+                        if total is None and re.fullmatch(r'"[!-~]{1,200}"', etag):
+                            validator = etag  # In memory only; never record arbitrary response header values.
+                        total = resource_size
+                        if file is None:
+                            file = path.open('xb')
+                        part_size = 0
+                        for chunk in response.iter_raw(chunk_size=65536):
+                            part_size += len(chunk)
+                            size += len(chunk)
+                            if part_size > length or size > total or size > max_bytes:
+                                raise AudioUploadError('download', 'audio exceeds declared or configured size')
+                            file.write(chunk)
+                            digest.update(chunk)
+                            md5.update(chunk)
+                        if part_size != length:
+                            raise AudioUploadError('download', 'truncated audio response')
+                    break
+                except (httpx.ReadTimeout, httpx.ConnectTimeout, httpx.ReadError, httpx.ConnectError, httpx.RemoteProtocolError):
+                    # Only transport failures may retry the identical range once (three total).
+                    # Refusals and logical/integrity failures are AudioUploadError and never retry.
+                    if response_status == 200 or chunk_retries >= 1 or network_retries >= 3:
+                        raise
+                    chunk_retries += 1
+                    network_retries += 1
+                    size, digest, md5 = checkpoint, saved_digest, saved_md5
+                    if file is not None:
+                        file.seek(checkpoint)
+                        file.truncate(checkpoint)
+        if size != total:
+            raise AudioUploadError('download', 'incomplete audio resource')
+    except httpx.HTTPError as exc:
+        known = {'ConnectTimeout', 'ReadTimeout', 'WriteTimeout', 'PoolTimeout', 'ConnectError',
+                 'ReadError', 'WriteError', 'RemoteProtocolError', 'LocalProtocolError', 'ProxyError'}
+        category = type(exc).__name__ if type(exc).__name__ in known else 'HTTPError'
+        raise AudioUploadError('download', 'network or TLS failure; stopped', network_error=category,
+                               bytes_received=size, responses_received=requests, network_retries=network_retries) from None
+    finally:
+        if file is not None:
+            file.close()
+    return {'bytes': size, 'sha256': digest.hexdigest(), 'md5': md5.hexdigest(), 'content_length_verified': True,
+            'complete_file_verified': True, 'download_http_status': response.status_code,
+            'download_requests': requests, 'download_network_retries': network_retries, 'range_validator_verified': bool(validator)}
 
 
 def validate_audio(path, expected_duration):
