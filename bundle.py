@@ -6,7 +6,8 @@ import zipfile
 ROOT = Path(__file__).resolve().parent
 FILES = [".gitignore", ".env.example", "AGENTS.md", "README.md", "DEPLOY.md", "VALIDATION.md",
          "UPSTREAM.json", "requirements.txt", "setup.sh", "video_assistant.py", "bundle.py",
-         "tests/test_assistant.py"]
+         "bilibili_extractor.py", "tests/test_assistant.py", "tests/test_bilibili_extractor.py",
+         "PROBE_DIAGNOSTICS.md"]
 
 
 def bundle(destination):
