@@ -11,7 +11,7 @@ FILES = [".gitignore", ".env.example", "AGENTS.md", "README.md", "DEPLOY.md", "V
          "runtime_config.py", "report_delivery.py", "tests/test_workflow.py",
          "platforms.py", "bilibili_media.py", "generic_media.py", "media_download.py",
          "audio_acquisition.py", "tests/test_platforms.py", "PLATFORMS.md",
-         "captions.py", "caption_extractor.py", "tests/test_captions.py", "CAPTIONS.md"]
+         "captions.py", "caption_extractor.py", "tests/test_captions.py", "CAPTIONS.md", "REFERENCE_COMPARISON.md"]
 
 
 def bundle(destination):

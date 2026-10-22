@@ -91,8 +91,38 @@ def choose_track(manual, automatic, languages=DEFAULT_LANGUAGES):
                 rank = next((i for i, pref in enumerate(languages)
                              if normalized == pref.casefold() or normalized.startswith(pref.casefold()+'-')), len(languages))
                 candidates.append(((automatic_flag, rank, formats[track['ext']]),
-                    {**track, 'language': language, 'kind': 'automatic' if automatic_flag else 'manual'}))
+                    {**track, 'language': language, 'kind': 'automatic' if automatic_flag else 'manual',
+                     'language_preference_matched': rank < len(languages)}))
     return min(candidates, key=lambda v: v[0])[1] if candidates else None
+
+
+def caption_quality(raw, duration):
+    """Timing diagnostics, not an accuracy score or automatic ASR decision."""
+    sentences = raw['transcripts'][0]['sentences']
+    end_limit = duration * 1000
+    covered, cursor, largest_gap, overlaps = 0, 0, 0, 0
+    seen = set()
+    duplicates = 0
+    for sentence in sentences:
+        a = min(end_limit, sentence['begin_time'])
+        b = min(end_limit, sentence['end_time'])
+        key = (sentence['begin_time'], sentence['end_time'], sentence['text'])
+        duplicates += key in seen
+        seen.add(key)
+        if a < cursor:
+            overlaps += 1
+        largest_gap = max(largest_gap, a - cursor)
+        covered += max(0, b - max(cursor, a))
+        cursor = max(cursor, b)
+    largest_gap = max(largest_gap, end_limit - cursor)
+    return {'first_start_seconds': sentences[0]['begin_time'] / 1000,
+            'last_end_seconds': max(s['end_time'] for s in sentences) / 1000,
+            'covered_seconds': round(covered / 1000, 3),
+            'timing_coverage_ratio': round(covered / end_limit, 4),
+            'largest_gap_seconds': round(largest_gap / 1000, 3),
+            'overlapping_cues': overlaps, 'exact_duplicate_cues': duplicates,
+            'content_review_required': True,
+            'note': 'Timing coverage cannot establish speech completeness; silence and music may have no captions.'}
 
 
 def fetch_captions(ref, max_minutes=300, languages=DEFAULT_LANGUAGES):
@@ -106,7 +136,7 @@ def fetch_captions(ref, max_minutes=300, languages=DEFAULT_LANGUAGES):
         return {'status': 'blocked', 'reason': 'caption_worker_failed_or_timed_out'}
     try:
         data = json.loads(result.stdout)
-        if data.get('status') not in {'available', 'unavailable', 'blocked'}: raise ValueError
+        if data.get('status') not in {'available', 'unavailable', 'restricted', 'blocked'}: raise ValueError
         return data
     except (ValueError, AttributeError):
         # Never print stderr or private platform responses.

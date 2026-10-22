@@ -8,7 +8,7 @@
 
 平台实际支持状态、样本和阻断见 [PLATFORMS.md](PLATFORMS.md)。B站已完成实际端到端；YouTube/Vimeo 已接入代码，但当前环境分别遇代理 CONNECT 403 和提取器登录要求，尚未通过线上音频与 ASR 验收。抖音、TikTok、西瓜仅预留入口，不开放处理。
 
-字幕研究、样本与使用边界见 [CAPTIONS.md](CAPTIONS.md)。YouTube 支持人工/平台自动字幕，B站按分 P 的 cid 查询字幕目录，弹幕不当字幕；匿名访问可能拿不到已有字幕。字幕请求被阻断时停止，不自动收费回退。
+字幕研究、样本与使用边界见 [CAPTIONS.md](CAPTIONS.md)。YouTube 支持人工/平台自动字幕，B站按分 P 的 cid 查询字幕目录，弹幕不当字幕；匿名访问可能拿不到已有字幕。字幕明确需登录或请求被阻断时停止，不自动收费回退。质量诊断记录覆盖、空档、重叠和重复，低覆盖不等于字幕缺失。参考对照见 [REFERENCE_COMPARISON.md](REFERENCE_COMPARISON.md)。
 
 ## 初始化
 

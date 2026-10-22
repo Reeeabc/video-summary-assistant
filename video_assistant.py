@@ -318,8 +318,8 @@ def caption_check(args):
         if result['status'] == 'available':
             write_json(folder / 'caption-raw.json', caption_raw(result['raw']))
         print(json.dumps({**summary, 'directory': str(folder)}, ensure_ascii=False))
-        if result['status'] == 'blocked':
-            raise Problem('字幕检查被阻断；未进入音频或收费转写：' + result['reason'])
+        if result['status'] in {'blocked', 'restricted'}:
+            raise Problem('字幕检查受访问限制或请求被阻断；未进入音频或收费转写：' + result['reason'])
 
 
 def audio_check(args):
@@ -502,8 +502,8 @@ def prepare(args):
                 print(json.dumps({'status': 'TRANSCRIPT_READY', 'source_kind': 'platform_subtitles',
                                   'directory': str(folder), 'transcription_submitted': False}, ensure_ascii=False))
                 return
-            if result['status'] == 'blocked':
-                raise Problem('字幕请求被阻断，未自动进入收费转写：' + result['reason'])
+            if result['status'] in {'blocked', 'restricted'}:
+                raise Problem('字幕受访问限制或请求被阻断，未自动进入收费转写：' + result['reason'])
             if strategy == 'subtitles-only':
                 raise Problem('无可用平台字幕；subtitles-only 禁止音频下载和收费转写。')
         headers = credentials()

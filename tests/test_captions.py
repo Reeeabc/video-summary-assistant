@@ -51,6 +51,8 @@ class CaptionTests(unittest.TestCase):
         translated = {'zh-Hans': [{'ext': 'json3', 'url': 'https://www.youtube.com/captions?tlang=zh-Hans'}]}
         self.assertIsNone(captions.choose_track(translated, {}))
         self.assertEqual(captions.choose_track({}, automatic)['kind'], 'automatic')
+        fallback = captions.choose_track({'ja': manual['en']}, {}, ('zh', 'en'))
+        self.assertFalse(fallback['language_preference_matched'])
 
     def test_json3_bili_srt_and_vtt_keep_times_and_source_text(self):
         raw = captions.parse_captions(BODY, 'json3', 10)
@@ -110,13 +112,14 @@ class CaptionTests(unittest.TestCase):
         with patch.object(extractor.httpx, 'Client', return_value=client), patch.object(extractor, 'MAX_BODY', 8):
             with self.assertRaises(captions.CaptionBlocked): extractor.caption_body(track, parse_video(URL))
 
-    def test_catalog_none_and_caption_only_login_are_unavailable_but_http_block_is_not(self):
+    def test_catalog_empty_login_and_http_failure_are_distinct(self):
         source = self.result()['source']
         with patch.object(extractor, 'youtube_catalog', return_value=(source, {}, {}, {})):
             self.assertEqual(extractor.collect(parse_video(URL), 300, ('zh',))['status'], 'unavailable')
         with patch.object(extractor, 'bili_catalog', return_value=(source, {}, {}, {'subtitle_login_required': True})):
             result = extractor.collect(parse_video('BV1gmJX6SExT'), 300, ('zh',))
             self.assertEqual(result['reason'], 'subtitle_login_required')
+            self.assertEqual(result['status'], 'restricted')
         catalog = {'zh': [{'ext': 'json3', 'url': 'https://www.youtube.com/captions'}]}
         with patch.object(extractor, 'youtube_catalog', return_value=(source, catalog, {}, {})), \
              patch.object(extractor, 'caption_body', side_effect=captions.CaptionBlocked('HTTP 403')):
@@ -166,11 +169,55 @@ class CaptionTests(unittest.TestCase):
 
     def test_blocked_and_subtitles_only_never_fall_back_to_paid_audio(self):
         for result, strategy in [({'status': 'blocked', 'reason': 'HTTP 403'}, 'auto'),
+                                 ({'status': 'restricted', 'reason': 'subtitle_login_required'}, 'auto'),
                                  ({'status': 'unavailable', 'reason': 'none'}, 'subtitles-only')]:
             with tempfile.TemporaryDirectory() as td, patch.object(app, 'ROOT', Path(td)), \
                  patch.object(app, 'fetch_captions', return_value=result), \
                  patch.object(app, 'credentials', side_effect=AssertionError('no billing')):
                 with self.assertRaises(app.Problem): app.prepare(self.args(source_strategy=strategy))
+
+    def test_bili_human_and_ai_tracks_share_platform_catalog_but_keep_provenance(self):
+        ref = parse_video('BV1gmJX6SExT')
+        def detail(ie):
+            ie._detail_pages = [{'cid': 10, 'duration': 10}]
+            return {'videoData': {'title': '字幕分类样本', 'owner': {'name': '作者'}}}
+        payload = {'code': 0, 'data': {'subtitle': {'subtitles': [
+            {'lan': 'zh-CN', 'ai_type': 0, 'subtitle_url': '//example.hdslb.com/human.json'},
+            {'lan': 'ai-zh', 'ai_type': 1, 'subtitle_url': '//example.hdslb.com/ai.json'}]}}}
+        with patch.object(extractor.ProjectBiliBiliIE, '_detail_state', detail), \
+             patch.object(extractor.ProjectBiliBiliIE, '_download_json', return_value=payload):
+            _, manual, automatic, _ = extractor.bili_catalog(ref, {'quiet': True})
+        self.assertIn('zh-CN', manual)
+        self.assertIn('ai-zh', automatic)
+        self.assertEqual(captions.choose_track(manual, automatic)['kind'], 'manual')
+        self.assertEqual(captions.choose_track({}, automatic)['kind'], 'automatic')
+
+    def test_quality_diagnostics_do_not_treat_silence_as_caption_absence(self):
+        source = extractor.public_source(parse_video(URL), '配乐中的一段讲话', '作者', 100)
+        catalog = {'zh': [{'ext': 'json3', 'url': 'https://www.youtube.com/captions'}]}
+        with patch.object(extractor, 'youtube_catalog', return_value=(source, catalog, {}, {})), \
+             patch.object(extractor, 'caption_body', return_value=BODY):
+            result = extractor.collect(parse_video(URL), 300, ('zh',))
+        self.assertEqual(result['status'], 'available')
+        quality = result['selected']['quality']
+        self.assertEqual(quality['timing_coverage_ratio'], .03)
+        self.assertEqual(quality['largest_gap_seconds'], 96)
+        self.assertTrue(quality['content_review_required'])
+
+    def test_quality_measures_union_overlap_and_duplicates_without_rewriting_source(self):
+        raw = {'transcripts': [{'sentences': [
+            {'begin_time': 0, 'end_time': 4000, 'text': '第一句'},
+            {'begin_time': 0, 'end_time': 4000, 'text': '第一句'},
+            {'begin_time': 3000, 'end_time': 6000, 'text': '重叠的第二句'},
+            {'begin_time': 8000, 'end_time': 9000, 'text': '结尾'}]}]}
+        before = json.dumps(raw, ensure_ascii=False)
+        quality = captions.caption_quality(raw, 10)
+        self.assertEqual(quality['covered_seconds'], 7)
+        self.assertEqual(quality['timing_coverage_ratio'], .7)
+        self.assertEqual(quality['overlapping_cues'], 2)
+        self.assertEqual(quality['exact_duplicate_cues'], 1)
+        self.assertEqual(quality['largest_gap_seconds'], 2)
+        self.assertEqual(json.dumps(raw, ensure_ascii=False), before)
 
     def test_caption_checkpoint_resume_and_mode_reuse_do_not_bill(self):
         with tempfile.TemporaryDirectory() as td:
@@ -221,6 +268,9 @@ class CaptionTests(unittest.TestCase):
             with patch.object(captions.subprocess, 'run', side_effect=run):
                 result = captions.fetch_captions(parse_video(URL))
             self.assertNotIn('signature', json.dumps(result))
+            with patch.object(captions.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0,
+                    '{"status":"restricted","reason":"subtitle_login_required"}', '')):
+                self.assertEqual(captions.fetch_captions(parse_video(URL))['status'], 'restricted')
 
 
 if __name__ == '__main__': unittest.main()

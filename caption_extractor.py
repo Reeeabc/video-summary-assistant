@@ -10,7 +10,7 @@ import yt_dlp
 from yt_dlp.utils import DownloadError, ExtractorError
 
 from bilibili_extractor import ProjectBiliBiliIE, ExtractionFailure, QuietLogger
-from captions import CaptionBlocked, choose_track, parse_captions
+from captions import CaptionBlocked, caption_quality, choose_track, parse_captions
 from generic_media import safe_failure
 from platforms import parse_video, public_headers
 from runtime_config import configure_ca, javascript_runtime
@@ -100,7 +100,8 @@ def collect(ref, max_minutes, languages):
     track = choose_track(manual, automatic, languages)
     common = {'source': source, 'manual_languages': sorted(manual), 'automatic_languages': sorted(automatic), **flags}
     if track is None:
-        return {**common, 'status': 'unavailable', 'reason': 'subtitle_login_required' if flags.get('subtitle_login_required') else 'no_supported_original_captions'}
+        return {**common, 'status': 'restricted' if flags.get('subtitle_login_required') else 'unavailable',
+                'reason': 'subtitle_login_required' if flags.get('subtitle_login_required') else 'no_supported_original_captions'}
     body = caption_body(track, ref)
     if re.match(r'\s*(?:<!doctype\s+html|<html\b)', body, re.I):
         raise CaptionBlocked('caption_response_is_html_or_verification_page')
@@ -109,7 +110,9 @@ def collect(ref, max_minutes, languages):
     except (ValueError, KeyError, TypeError, AttributeError):
         return {**common, 'status': 'unavailable', 'reason': 'empty_or_invalid_caption_body'}
     selected = {'language': track['language'], 'kind': track['kind'], 'format': track['ext'],
-                'cue_count': len(raw['transcripts'][0]['sentences'])}
+                'cue_count': len(raw['transcripts'][0]['sentences']),
+                'language_preference_matched': track['language_preference_matched'],
+                'quality': caption_quality(raw, source['duration_seconds'])}
     source['subtitles'] = selected
     return {**common, 'status': 'available', 'selected': selected, 'raw': raw}
 
