@@ -77,4 +77,3 @@ def resolve_bilibili(url, max_minutes=300, *, media_headers=None):
             if k.lower() in {"user-agent", "referer", "origin", "accept", "accept-language", "sec-fetch-mode"}
             and isinstance(v, str)})
     return metadata, audio["url"]
-

@@ -32,8 +32,6 @@ MODELS = {"qwen-audio-3.1-asr-flash-filetrans", "qwen-audio-3.0-asr-flash-filetr
           "paraformer-v2", "fun-asr"}
 
 
-
-
 def redact(value):
     if isinstance(value, dict):
         return {str(k): ("[redacted]" if any(w in str(k).lower() for w in
