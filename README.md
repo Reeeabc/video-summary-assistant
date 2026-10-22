@@ -25,6 +25,38 @@ Range 检查会继承 yt-dlp 的公开媒体请求头（包括 User-Agent 和 Re
 这些媒体请求头不会自动传给百炼。当前云端一次实际转写验收返回 `FILE_DOWNLOAD_FAILED`；
 解析或 Range 成功不代表百炼能取流，尚未通过端到端验收，详情见 [VALIDATION.md](VALIDATION.md)。
 
+## 可选：百炼官方临时上传
+
+无需配置自有 OSS。此模式在云端临时下载所选分 P 的独立音轨，核对 Content-Length、
+SHA-256、AAC 单音轨及分 P 时长，并用 FFmpeg 完整解码；通过后才向当前模型申请官方上传凭证。
+需要系统安装 `ffmpeg` 和 `ffprobe`。默认下载上限 256 MiB，可用 `--max-audio-mib` 调整至最高 1024 MiB。
+本地音频在成功或失败退出时删除，不保存视频画面；网络或上传结果未知时不自动重试。
+
+仅验证下载和上传，不提交收费转写：
+
+```bash
+.venv/bin/python video_assistant.py upload-check 'BV1gmJX6SExT'
+```
+
+脱敏结果保存到 `runs/<BV>-p<分P>-upload-check/upload-state.json`，已有记录不覆盖。
+旧的失败转写目录及默认 `direct-url` 模式保持独立。官方临时存储约 48 小时后自动清理，
+文件绑定上传时的模型及主账号，官方不支持上传后查询或下载。
+上传凭证、源直链和 `oss://` 地址仅在内存中使用，不输出、不写入检查点。
+因此 `upload-check` 是验证操作，之后正式转写会重新下载和上传，不能复用此检查中的临时地址。
+
+只有用户另行授权收费转写后，才运行：
+
+```bash
+.venv/bin/python video_assistant.py prepare 'BV1gmJX6SExT' --input-mode bailian-upload
+```
+
+该模式默认使用带 `-bailian-upload` 后缀的新任务目录，以免覆盖原直链任务；
+提交时添加官方要求的 `X-DashScope-OssResourceResolve: enable`，仍执行提交前检查点和任务 ID 落盘。
+上传 HTTP 200 与 ETag 一致只能验证存储回执，不能证明模型转写成功。
+
+依据：[官方临时存储接口](https://help.aliyun.com/zh/model-studio/get-temporary-file-url/)、
+[当前 ASR 模型 HTTP API](https://help.aliyun.com/zh/model-studio/fun-asr-recorded-speech-recognition-http-api)。
+
 ## 使用
 
 在选定本项目环境的 Codex 云端任务中发送：

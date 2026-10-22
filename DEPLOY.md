@@ -14,6 +14,10 @@
 
 ## 网络与密钥
 
+可选临时上传模式需要系统安装 FFmpeg（含 `ffmpeg`、`ffprobe`）。仅使用直链模式不需要这两个工具。
+无需创建自有 OSS；上传目标由百炼上传凭证接口返回，需允许该实际官方临时存储域名。
+百炼 API Key 仍只绑定百炼 API 域名，不应扩大到存储域名；存储上传使用接口返回的临时表单凭证。
+
 开启 `Allow Codex to access internet`，允许依赖安装域名、B站页面/API/CDN、百炼 API 和阿里云转写结果存储域名。视频直链和结果域名是动态的；先在配置中选择适合的域名范围并通过 probe 实测，不能只允许 www.bilibili.com。
 
 典型目的地包括 `pypi.org`、`files.pythonhosted.org`、`bilibili.com` 及其 API 子域、B站实际返回的 bilivideo.com / bilivideo.cn CDN 域名、`<业务空间ID>.cn-beijing.maas.aliyuncs.com` 和实际转写结果 OSS 域名。按界面支持的格式添加主域/子域或具体主机；网络被拒时只补充实际必要的目的地。账户或组织策略可能进一步限制网络。

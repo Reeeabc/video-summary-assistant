@@ -87,6 +87,7 @@ class AssistantTests(unittest.TestCase):
     def test_submit_checkpoint_survives_ambiguous_network_failure(self):
         def failure(request):
             self.assertEqual(json.loads((folder / "state.json").read_text())["status"], "SUBMISSION_UNKNOWN")
+            self.assertNotIn("X-DashScope-OssResourceResolve", request.headers)
             self.assertEqual(json.loads(request.content)["input"]["file_urls"], ["https://cdn.test/audio?sign=abc"])
             self.assertEqual(request.headers["Authorization"], "Bearer test-secret")
             raise httpx.ReadTimeout("secret URL should never reach user", request=request)

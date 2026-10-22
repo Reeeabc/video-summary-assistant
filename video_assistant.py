@@ -1,6 +1,6 @@
 """Bilibili direct audio -> durable Bailian task -> sources for a Codex report.
 
-No report-model API, media downloads, personal browser sessions, or OSS uploads.
+No report-model API or personal browser sessions. Optional temporary audio upload.
 """
 from __future__ import annotations
 
@@ -236,12 +236,17 @@ def provider_code(data):
 
 
 def submit(client, folder, state, direct, headers):
+    submission_headers = {**headers, "X-DashScope-Async": "enable"}
+    if state.get("input_mode", "direct-url") == "bailian-upload":
+        if not direct.startswith("oss://"):
+            raise Problem("临时上传模式缺少有效存储地址；未提交转写。")
+        submission_headers["X-DashScope-OssResourceResolve"] = "enable"
     # Reserve before POST, so crashes and ambiguous responses cannot trigger a duplicate bill.
     state.update(status="SUBMISSION_UNKNOWN", submission_started=datetime.now(timezone.utc).isoformat())
     write_json(folder / "state.json", state)
     try:
         response = client.post(base_url(state["workspace"]) + "/api/v1/services/audio/asr/transcription",
-                               headers={**headers, "X-DashScope-Async": "enable"},
+                               headers=submission_headers,
                                json={"model": state["model"], "input": {"file_urls": [direct]},
                                      "parameters": {"channel_id": [0]}})
         data = response.json()
@@ -311,14 +316,63 @@ def poll(client, folder, state, headers, wait_seconds):
         time.sleep(min(5, max(0, deadline - time.monotonic())))
 
 
+def stage_for_bailian(source, direct, media_headers, model, workspace, auth, state, path, max_audio_mib):
+    from temporary_audio import AudioUploadError, stage_audio
+    def event(status, details):
+        if status == "LOCAL_AUDIO_REMOVED":
+            state["local_audio_removed"] = True
+        else:
+            state["upload_status"] = status
+            state.update(details)
+        write_json(path, state)
+    try:
+        uri, summary = stage_audio(direct, media_headers, source["duration_seconds"], model,
+            base_url(workspace), auth, max_bytes=max_audio_mib * 1024 * 1024, event=event)
+    except AudioUploadError as exc:
+        state.update(upload_status="UPLOAD_UNKNOWN" if "result unknown" in exc.details["reason"] else "FAILED",
+                     upload_error=exc.details)
+        write_json(path, state)
+        raise Problem("音频上传验证失败；未提交转写。" + str(exc)) from None
+    state.update(summary)
+    write_json(path, state)
+    return uri
+
+
+def upload_check(args):
+    """Deliberately separate from prepare: this command cannot submit ASR."""
+    url, identity = canonical(args.url)
+    folder = (args.output or ROOT / "runs" / (identity + "-upload-check")).resolve()
+    with locked(folder):
+        path = folder / "upload-state.json"
+        if path.exists() or (folder / "state.json").exists():
+            raise Problem("目录已有任务或上传记录；不覆盖、不自动重新上传。")
+        model = os.environ.get("ASR_MODEL", "qwen-audio-3.1-asr-flash-filetrans")
+        if model not in MODELS:
+            raise Problem("ASR_MODEL 尚未适配。")
+        auth = credentials()
+        workspace = os.environ.get("BAILIAN_WORKSPACE_ID", "").strip()
+        base_url(workspace)
+        media_headers = {}
+        source, direct = resolve(url, args.max_minutes, media_headers=media_headers)
+        state = {"source": source, "model": model, "workspace": workspace,
+                 "input_mode": "bailian-upload", "transcription_submitted": False}
+        write_json(path, state)
+        stage_for_bailian(source, direct, media_headers, model, workspace, auth, state, path, args.max_audio_mib)
+        print(json.dumps({"upload_status": state["upload_status"], "audio": state["audio"],
+            "upload": state["upload"], "local_audio_removed": state["local_audio_removed"],
+            "transcription_submitted": False, "directory": str(folder)}, ensure_ascii=False))
+
+
 def prepare(args):
     url, identity = canonical(args.url)
-    folder = (args.output or ROOT / "runs" / (identity + "-" + args.mode)).resolve()
+    suffix = "-bailian-upload" if args.input_mode == "bailian-upload" else ""
+    folder = (args.output or ROOT / "runs" / (identity + "-" + args.mode + suffix)).resolve()
     with locked(folder):
         path = folder / "state.json"
         if path.exists():
             state = json.loads(path.read_text())
-            if state["source"]["video_url"] != url or state["report_mode"] != args.mode:
+            if (state["source"]["video_url"] != url or state["report_mode"] != args.mode
+                    or state.get("input_mode", "direct-url") != args.input_mode):
                 raise Problem("输出目录属于其他视频或模式，请使用独立目录。")
             return resume_locked(folder, state, args.wait_seconds)
         headers = credentials()
@@ -327,8 +381,15 @@ def prepare(args):
             raise Problem("ASR_MODEL 尚未适配。")
         workspace = os.environ.get("BAILIAN_WORKSPACE_ID", "").strip()
         base_url(workspace)
-        source, direct = resolve(url, args.max_minutes)
-        state = {"source": source, "report_mode": args.mode, "workspace": workspace, "model": model}
+        media_headers = {}
+        source, direct = resolve(url, args.max_minutes, media_headers=media_headers)
+        state = {"source": source, "report_mode": args.mode, "workspace": workspace, "model": model,
+                 "input_mode": args.input_mode}
+        if args.input_mode == "bailian-upload":
+            state["status"] = "AUDIO_STAGING"
+            write_json(path, state)
+            direct = stage_for_bailian(source, direct, media_headers, model, workspace, headers,
+                                      state, path, args.max_audio_mib)
         with httpx.Client(timeout=httpx.Timeout(90, connect=15)) as client:
             submit(client, folder, state, direct, headers)
             poll(client, folder, state, headers, args.wait_seconds)
@@ -405,6 +466,13 @@ def main():
     p.add_argument("--output", type=Path)
     p.add_argument("--max-minutes", type=int, default=60)
     p.add_argument("--wait-seconds", type=int, default=900)
+    p.add_argument("--input-mode", choices=["direct-url", "bailian-upload"], default="direct-url")
+    p.add_argument("--max-audio-mib", type=int, default=256)
+    p = commands.add_parser("upload-check", help="仅下载验证独立音频并上传官方临时存储，不提交转写")
+    p.add_argument("url")
+    p.add_argument("--output", type=Path)
+    p.add_argument("--max-minutes", type=int, default=60)
+    p.add_argument("--max-audio-mib", type=int, default=256)
     p = commands.add_parser("probe", help="仅解析元数据和音轨，不提交百炼或下载媒体")
     p.add_argument("url")
     p.add_argument("--max-minutes", type=int, default=60)
@@ -419,8 +487,12 @@ def main():
     args = parser.parse_args()
     if getattr(args, "wait_seconds", 1) < 1 or not 1 <= getattr(args, "max_minutes", 1) <= 300:
         raise Problem("等待时长必须为正；单次视频上限支持 1–300 分钟。")
+    if not 1 <= getattr(args, "max_audio_mib", 1) <= 1024:
+        raise Problem("临时音频大小上限须为 1–1024 MiB。")
     if args.command == "prepare":
         prepare(args)
+    elif args.command == "upload-check":
+        upload_check(args)
     elif args.command == "probe":
         media_headers = {}
         metadata, direct = resolve(canonical(args.url)[0], args.max_minutes, media_headers=media_headers)
