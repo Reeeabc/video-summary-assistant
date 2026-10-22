@@ -22,8 +22,9 @@
 无需修改虚拟环境依赖文件；API 返回错误时立即停止，不自动重试。
 Range 检查会继承 yt-dlp 的公开媒体请求头（包括 User-Agent 和 Referer），
 不会转发 Cookie 或 Authorization；这些请求头只在内存中传递，不写入任务元数据。
-这些媒体请求头不会自动传给百炼。当前云端一次实际转写验收返回 `FILE_DOWNLOAD_FAILED`；
-解析或 Range 成功不代表百炼能取流，尚未通过端到端验收，详情见 [VALIDATION.md](VALIDATION.md)。
+这些媒体请求头不会自动传给百炼。直链模式此前一次实际验收返回 `FILE_DOWNLOAD_FAILED`；
+临时上传模式已完成一次实际转写、HTML 报告与静态校验。浏览器视觉和手机端验收仍待完成，
+不同视频及直链模式的取流结果不能由此保证，详情见 [VALIDATION.md](VALIDATION.md)。
 
 ## 可选：百炼官方临时上传
 
