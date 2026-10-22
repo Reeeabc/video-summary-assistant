@@ -231,7 +231,9 @@ REQUIRED_FILES = ('transcript.srt', 'transcript.txt', 'transcript.md',
 def evidence_files(state):
     if state.get('source_kind') == 'platform_subtitles':
         return ('caption-raw.json', 'caption-check.json')
-    return ('asr-task.json', 'asr-raw.json') + (('caption-check.json',) if state.get('source_strategy') == 'auto' else ())
+    return (('asr-task.json', 'asr-raw.json')
+            + (('caption-check.json',) if state.get('source_strategy') == 'auto' else ())
+            + (('direct-url-state.json', 'direct-url-asr-task.json') if state.get('fallback_used') else ()))
 
 
 def write_archive(folder, name, report_files):

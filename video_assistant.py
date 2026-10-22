@@ -1,6 +1,6 @@
 """Public single-video audio -> durable Bailian task -> sources for a Codex report.
 
-No report-model API or personal browser sessions. Official temporary upload by default.
+No report-model API or personal browser sessions. Direct URL, then one upload fallback.
 """
 from __future__ import annotations
 
@@ -174,7 +174,7 @@ def export_sources(folder, state, raw):
                  transcript_sha256=hashlib.sha256(text.encode()).hexdigest(),
                  source_checksums={name: hashlib.sha256((folder / name).read_bytes()).hexdigest()
                                    for name in ("transcript.md", "transcript.txt", "source-units.json", "input.json")})
-    if state.get('source_kind') == 'platform_subtitles':
+    if state.get('source_kind') == 'platform_subtitles' or state.get('fallback_used'):
         state['source_checksums'].update({n: hashlib.sha256((folder / n).read_bytes()).hexdigest()
                                          for n in evidence_files(state)})
     write_json(folder / "state.json", state)
@@ -246,7 +246,8 @@ def poll(client, folder, state, headers, wait_seconds):
             results = output.get("results") or []
             result = next((r for r in results if r.get("subtask_status") == "SUCCEEDED"), None)
             if not result or not result.get("transcription_url"):
-                state.update(status="ASR_FAILED", provider_code=provider_code(result or (results[0] if results else output)))
+                state.update(status="ASR_FAILED", provider_task_status=cloud_status,
+                             provider_code=provider_code(result or (results[0] if results else output)))
                 write_json(folder / "state.json", state)
                 raise Problem(f"百炼转写失败（{state['provider_code']}）；查看 asr-task.json，不自动重提。")
             url = result["transcription_url"]
@@ -271,6 +272,44 @@ def poll(client, folder, state, headers, wait_seconds):
         if time.monotonic() >= deadline:
             raise Problem("本次等待结束，云端任务可能仍在运行；用 resume 继续查询。")
         time.sleep(min(5, max(0, deadline - time.monotonic())))
+
+
+def can_upload_fallback(state):
+    # Only new tasks carrying this policy can create a second, bounded attempt.
+    return (state.get('upload_fallback_allowed') is True and not state.get('fallback_used')
+            and state.get('input_mode') == 'direct-url' and bool(state.get('task_id'))
+            and state.get('status') == 'ASR_FAILED' and state.get('provider_task_status') == 'FAILED')
+
+
+def upload_fallback(client, folder, state, headers, wait_seconds):
+    if not can_upload_fallback(state):
+        raise Problem('此任务不满足一次上传回退条件；保留证据，不自动重提。')
+    # Retain the original task and terminal response before replacing the active ID.
+    shutil.copyfile(folder / 'asr-task.json', folder / 'direct-url-asr-task.json')
+    write_json(folder / 'direct-url-state.json', state)
+    state.update(input_mode='bailian-upload', fallback_used=True, status='AUDIO_STAGING',
+                 direct_task_id=state['task_id'])
+    for name in ('task_id', 'provider_code', 'provider_task_status', 'submission_started', 'http_status', 'usage'):
+        state.pop(name, None)
+    write_json(folder / 'state.json', state)
+    # Download a fresh URL with extractor headers; never pass those headers to ASR.
+    media_headers = {}
+    source, direct = resolve(state['source']['video_url'], state['max_minutes'], media_headers=media_headers)
+    state['source'] = source
+    write_json(folder / 'state.json', state)
+    uri = stage_for_bailian(source, direct, media_headers, state['model'], state['workspace'], headers,
+                            state, folder / 'state.json', state['max_audio_mib'])
+    submit(client, folder, state, uri, headers)
+    poll(client, folder, state, headers, wait_seconds)
+
+
+def poll_with_fallback(client, folder, state, headers, wait_seconds):
+    try:
+        poll(client, folder, state, headers, wait_seconds)
+    except Problem:
+        if not can_upload_fallback(state):
+            raise
+        upload_fallback(client, folder, state, headers, wait_seconds)
 
 
 def stage_for_bailian(source, direct, media_headers, model, workspace, auth, state, path, max_audio_mib):
@@ -516,18 +555,28 @@ def prepare(args):
         base_url(workspace)
         media_headers = {}
         source, direct = resolve(url, args.max_minutes, media_headers=media_headers)
-        if args.input_mode == 'direct-url':
-            direct = direct_url(direct)
+        actual_mode = args.input_mode
+        if actual_mode == 'direct-url':
+            try:
+                direct = direct_url(direct)
+            except Problem:
+                # A segmented manifest is not a file URL; no direct task is submitted.
+                actual_mode = 'bailian-upload'
         state = {"source": source, "report_mode": args.mode, "workspace": workspace, "model": model,
-                 "input_mode": args.input_mode, "source_kind": "asr", "source_strategy": strategy}
-        if args.input_mode == "bailian-upload":
+                 "input_mode": actual_mode, "requested_input_mode": args.input_mode,
+                 "upload_fallback_allowed": args.input_mode == 'direct-url',
+                 "max_minutes": args.max_minutes, "max_audio_mib": args.max_audio_mib,
+                 "source_kind": "asr", "source_strategy": strategy}
+        if actual_mode != args.input_mode:
+            state['direct_url_skipped'] = 'segmented_audio'
+        if actual_mode == "bailian-upload":
             state["status"] = "AUDIO_STAGING"
             write_json(path, state)
             direct = stage_for_bailian(source, direct, media_headers, model, workspace, headers,
                                       state, path, args.max_audio_mib)
         with httpx.Client(timeout=httpx.Timeout(90, connect=15)) as client:
             submit(client, folder, state, direct, headers)
-            poll(client, folder, state, headers, args.wait_seconds)
+            poll_with_fallback(client, folder, state, headers, args.wait_seconds)
     print(json.dumps({"status": "TRANSCRIPT_READY", "directory": str(folder)}, ensure_ascii=False))
 
 
@@ -547,12 +596,17 @@ def resume_locked(folder, state, wait_seconds):
     if (folder / "asr-raw.json").exists():
         export_sources(folder, state, json.loads((folder / "asr-raw.json").read_text()))
         return
+    if state.get('status') == 'AUDIO_STAGING':
+        raise Problem('音频准备曾失败或中断；保留证据，不自动重新下载、上传或提交。')
     if not state.get("task_id"):
         raise Problem("没有原任务 ID；先核实百炼控制台，再用 attach-task 恢复。不会自动重提。")
     if state.get("status") == "ASR_FAILED":
+        if can_upload_fallback(state):
+            with httpx.Client(timeout=httpx.Timeout(90, connect=15)) as client:
+                return upload_fallback(client, folder, state, credentials(), wait_seconds)
         raise Problem("原转写任务已失败。查看任务证据；另建计费任务需要用户明确授权。")
     with httpx.Client(timeout=httpx.Timeout(90, connect=15)) as client:
-        poll(client, folder, state, credentials(), wait_seconds)
+        poll_with_fallback(client, folder, state, credentials(), wait_seconds)
 
 
 class ReportParser(HTMLParser):
@@ -655,13 +709,13 @@ def main():
     configure_ca()
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
-    p = commands.add_parser("prepare", help="优先直接获取平台字幕；确认不可用时才准备音频并提交一次转写")
+    p = commands.add_parser("prepare", help="字幕优先；需要 ASR 时默认直链，明确失败后仅回退上传一次")
     p.add_argument("url")
     p.add_argument("--mode", choices=["standard", "brief"], default="standard")
     p.add_argument("--output", type=Path)
     p.add_argument("--max-minutes", type=int, default=DEFAULT_MAX_MINUTES)
     p.add_argument("--wait-seconds", type=int, default=900)
-    p.add_argument("--input-mode", choices=["direct-url", "bailian-upload"], default="bailian-upload")
+    p.add_argument("--input-mode", choices=["direct-url", "bailian-upload"], default="direct-url")
     p.add_argument("--max-audio-mib", type=int, default=DEFAULT_AUDIO_MIB)
     p.add_argument('--reuse-from', type=Path, help='优先复用已导入的成功任务目录')
     p.add_argument('--new-attempt', action='store_true', help='仅在明确授权重试后使用；未知提交仍禁止重提')

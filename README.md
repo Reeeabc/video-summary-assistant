@@ -2,9 +2,9 @@
 
 在已配置的 Codex Cloud 环境发送单条 B站、YouTube 或 Vimeo 链接并要求总结，默认执行：
 
-**单视频链接 → 复用已有成功来源 → 优先获取平台字幕 → 有字幕直接生成报告；确认字幕不可用或字幕明确需登录时，才下载/校验独立音频 → 百炼临时上传 → ASR → 报告。**
+**单视频链接 → 复用已有成功来源 → 优先获取平台字幕 → 有字幕直接生成报告；字幕不可用或明确需登录时，提取独立音频直链 → 百炼 ASR → 报告；直链任务明确失败后，最多一次下载/校验音频 → 百炼临时上传 → ASR。**
 
-默认 source-strategy=auto，ASR 输入方式为 `bailian-upload`；standard 模式、最长 **300 分钟**、音频最大 **1024 MiB**。不下载视频画面，不需要自有 OSS 或额外报告模型 API Key。`direct-url` 是手动选项，失败不自动切换模式或另建收费任务。实际验收及本轮非计费检查见 [VALIDATION.md](VALIDATION.md)。
+默认 source-strategy=auto，ASR 输入方式为 `direct-url`；standard 模式、最长 **300 分钟**、音频最大 **1024 MiB**。不下载视频画面，不需要自有 OSS 或额外报告模型 API Key。新直链任务明确 FAILED 后最多回退一次 `bailian-upload`；提交未知不重提，上传回退失败后停止。实际验收及本轮非计费检查见 [VALIDATION.md](VALIDATION.md)。
 
 平台实际支持状态、样本和阻断见 [PLATFORMS.md](PLATFORMS.md)。B站已完成实际端到端；YouTube/Vimeo 已接入代码，但当前环境分别遇代理 CONNECT 403 和提取器登录要求，尚未通过线上音频与 ASR 验收。抖音、TikTok、西瓜仅预留入口，不开放处理。
 
@@ -43,7 +43,7 @@ bash setup.sh
 .venv/bin/python video_assistant.py verify '任务目录'
 ```
 
-默认新任务目录 `runs/<平台>-<视频ID>[-p分P]-<模式>-bailian-upload/`，B站 URL 的 p 参数选择分 P。旧任务目录原样保留，按规范链接复用，不因加平台前缀重复转写。YouTube 接受 watch、youtu.be、shorts/embed 单视频；Vimeo 接受公开数字 ID 或 player 链接。不展开合集、频道或直播。`--max-minutes` 接受 1–300，`--max-audio-mib` 接受 1–1024，可主动收紧。服务端临时上传策略若更小，程序在上传前检查实际文件大小，报告字节上下限并停止，不绕过限制。2026-10-22 只读查询当前模型策略上限为 1,073,741,824 字节（1024 MiB），不保证未来不变。
+默认新任务目录 `runs/<平台>-<视频ID>[-p分P]-<模式>/`（显式 bailian-upload 另加 -bailian-upload 后缀），B站 URL 的 p 参数选择分 P。旧任务目录原样保留，按规范链接复用，不因加平台前缀重复转写。YouTube 接受 watch、youtu.be、shorts/embed 单视频；Vimeo 接受公开数字 ID 或 player 链接。不展开合集、频道或直播。`--max-minutes` 接受 1–300，`--max-audio-mib` 接受 1–1024，可主动收紧。服务端临时上传策略若更小，程序在上传前检查实际文件大小，报告字节上下限并停止，不绕过限制。2026-10-22 只读查询当前模型策略上限为 1,073,741,824 字节（1024 MiB），不保证未来不变。
 
 以下诊断不提交 ASR：
 
@@ -63,15 +63,15 @@ bash setup.sh
 
 audio-check 在 runs/<平台>-<视频ID>[-p分P]-audio-check/audio-check.json 保存脱敏阶段和失败证据，成功/失败均清理临时音频；已有证据不覆盖、不自动重复检查。
 
-手动直链模式为 `prepare 视频链接 --input-mode direct-url`。仅支持单文件直链，分段音轨明确拒绝并提示使用上传模式；它把音频直链交给百炼，不假定云端 User-Agent/Referer 会传给百炼。此前一次实际直链任务 `FILE_DOWNLOAD_FAILED`，临时上传模式随后完成实际转写与报告；云端取流成功不能证明百炼也能取流。
+默认直链模式为 `prepare 视频链接`（等同 --input-mode direct-url）。直链仅支持单文件；分段音轨预检后直接进入上传模式，不提交无效直链任务；它把音频直链交给百炼，不假定云端 User-Agent/Referer 会传给百炼。此前一次实际直链任务 `FILE_DOWNLOAD_FAILED`，临时上传模式随后完成实际转写与报告；云端取流成功不能证明百炼也能取流。
 
-直链模式省去本地媒体下载和临时上传，但要求百炼能在签名有效期内独立读取完整、受支持格式的音频。需 Referer/Cookie、出口受限或分段清单的地址不保证可用，平台网页 URL 不能替代音频文件 URL。直链任务失败后停止，不自动切到上传模式再发起一次收费任务；默认仍为已验收的 bailian-upload。
+直链模式省去本地媒体下载和临时上传，但要求百炼能在签名有效期内独立读取完整、受支持格式的音频。需 Referer/Cookie、出口受限或分段清单的地址不保证可用，平台网页 URL 不能替代音频文件 URL。新直链任务明确 FAILED 后自动回退一次下载上传 ASR；先归档原任务 ID/终态响应，再持久化回退检查点，重新解析新鲜音轨并下载校验。显式 --input-mode bailian-upload 可跳过直链。该新调度流程仅离线验收，历史直链失败与上传成功证据保持不变。
 
 ## 恢复、复用与安全
 
-`prepare` 在查询字幕、获取新直链、凭据和计费前寻找可访问的成功任务，检查来源完整性；不同阅读模式也复用原转写。始终使用返回目录，复用不会新建 ASR。`status 目录` 查看脱敏检查点。提交前持久化 `SUBMISSION_UNKNOWN`，拿到任务 ID 立即保存，后续仅查询原任务。
+`prepare` 在查询字幕、获取新直链、凭据和计费前寻找可访问的成功任务，检查来源完整性；不同阅读模式也复用原转写。始终使用返回目录，复用不会新建 ASR。`status 目录` 查看脱敏检查点。提交前持久化 `SUBMISSION_UNKNOWN`，拿到任务 ID 立即保存，正常恢复仅查询已保存的任务 ID；仅明确失败可按下述策略回退。
 
-未知提交不得自动重提，由用户从百炼控制台核实原任务，再 `attach-task 目录 原任务ID`。失败任务不自动另建收费任务；只有用户明确授权新尝试后，才用 `--new-attempt --output 新目录`，保留旧证据。该参数不能绕过未知提交。恢复使用创建时冻结的模型和业务空间，当前密钥须能访问原任务。
+未知提交不得自动重提，由用户从百炼控制台核实原任务，再 `attach-task 目录 原任务ID`。仅带 upload_fallback_allowed 的新直链任务明确 FAILED 时允许一次上传回退，回退期间冻结模型/业务空间和本地限制；resume 可查询原直链后继续这一回退。取消、提交拒绝、查询/结果下载失败不触发回退。历史失败任务、上传失败或中断不自动另建收费任务；其他重试只有用户明确授权后，才用 `--new-attempt --output 新目录`，保留旧证据。该参数不能绕过未知提交。恢复使用创建时冻结的模型和业务空间，当前密钥须能访问原任务。
 
 新会话可能有独立文件系统，不能承诺跨会话自动发现旧任务。结束前下载完整 ZIP；复用时解压回 `runs/`，或用 `prepare 视频链接 --reuse-from 已解压的任务目录`。导入错误、成功来源损坏时停止，不以重新计费替代修复。
 
@@ -92,7 +92,7 @@ B站继续核对 Content-Length、SHA-256、AAC 音轨、时长及完整解码�
 
 字幕任务的 TXT 文件后缀为“原始字幕”；ASR 任务为“原始转写”。source_kind=platform_subtitles 时，ZIP 使用真实 caption-raw.json 与 caption-check.json，不生成虚构的 ASR 任务文件。auto 回退 ASR 时保留字幕不可用或需登录的证据。
 
-ASR 任务 ZIP 还包含原始 `transcript.txt`、`transcript.md`、`input.json`、`source-units.json`、`state.json`、`asr-task.json`、脱敏 `asr-raw.json`、`report-check.json` 和可用的 `review.json`。**主题命名的 Markdown 是阅读报告，`transcript.md` 是原始转写**，不能互相代替。
+ASR 任务 ZIP 还包含原始 `transcript.txt`、`transcript.md`、`input.json`、`source-units.json`、`state.json`、`asr-task.json`、脱敏 `asr-raw.json`、上传回退时的 `direct-url-state.json` / `direct-url-asr-task.json`、`report-check.json` 和可用的 `review.json`。**主题命名的 Markdown 是阅读报告，`transcript.md` 是原始转写**，不能互相代替。
 
 `deliver` 检查 Markdown 实际存在且对应 HTML、来源 ID 有效，再逐字节检查归档内容。内容仍须人工核对来源；浏览器视觉验收无法完成时写入 `review.json`，继续静态检查和交付，不声称视觉验收通过。
 

@@ -1,4 +1,4 @@
-from contextlib import redirect_stdout
+from contextlib import contextmanager, redirect_stdout
 import hashlib
 import io
 import json
@@ -10,6 +10,7 @@ import unittest
 from unittest.mock import patch
 import zipfile
 
+import httpx
 import report_delivery as delivery
 from runtime_config import configure_ca
 import video_assistant as app
@@ -47,7 +48,7 @@ class WorkflowTests(unittest.TestCase):
             '<details><summary>来源说明</summary><p>原始来源保留。</p></details>'
             '<footer>视频报告·精读</footer></main><script>window.secret="不应进入MD"</script></body></html>')
 
-    def test_cli_defaults_and_manual_direct_url(self):
+    def test_cli_defaults_and_manual_upload(self):
         for command, handler in [('prepare', 'prepare'), ('upload-check', 'upload_check')]:
             with self.subTest(command=command), patch.object(app.sys, 'argv', ['video_assistant.py', command, 'BV1gmJX6SExT']), \
                  patch.object(app, handler) as called:
@@ -56,12 +57,170 @@ class WorkflowTests(unittest.TestCase):
                 self.assertEqual(args.max_minutes, 300)
                 self.assertEqual(args.max_audio_mib, 1024)
                 if command == 'prepare':
-                    self.assertEqual(args.input_mode, 'bailian-upload')
+                    self.assertEqual(args.input_mode, 'direct-url')
                     self.assertEqual(args.source_strategy, 'auto')
-        with patch.object(app.sys, 'argv', ['video_assistant.py', 'prepare', 'BV1gmJX6SExT', '--input-mode', 'direct-url']), \
+        with patch.object(app.sys, 'argv', ['video_assistant.py', 'prepare', 'BV1gmJX6SExT', '--input-mode', 'bailian-upload']), \
              patch.object(app, 'prepare') as called:
             app.main()
-            self.assertEqual(called.call_args.args[0].input_mode, 'direct-url')
+            self.assertEqual(called.call_args.args[0].input_mode, 'bailian-upload')
+
+    @contextmanager
+    def fallback_scenario(self, direct_status='FAILED', upload_status='SUCCEEDED', ambiguous=None, segmented=False):
+        with tempfile.TemporaryDirectory() as td:
+            root, calls = Path(td), []
+            folder = root/'runs'/'test-direct'
+            args = self.arguments(input_mode='direct-url', source_strategy='audio-only', output=folder)
+            raw = {'transcripts': [{'sentences': [{'text': '完整来源正文', 'begin_time': 1000, 'end_time': 5000}]}]}
+            source = {'video_url': URL, 'duration_seconds': 10}
+            def handler(request):
+                self.assertTrue(request.url.host.endswith('.aliyuncs.com'))
+                if request.method == 'POST':
+                    state = json.loads((folder/'state.json').read_text())
+                    self.assertEqual(state['status'], 'SUBMISSION_UNKNOWN')
+                    body = json.loads(request.content)
+                    direct = body['input']['file_urls'][0].startswith('https://')
+                    task = 'direct-task' if direct else 'upload-task'
+                    self.assertNotIn('Referer', request.headers)
+                    calls.append(task)
+                    if ambiguous == task:
+                        raise httpx.ReadTimeout('response lost', request=request)
+                    if ambiguous == 'reject':
+                        return httpx.Response(400, json={'code': 'InvalidApiKey'})
+                    self.assertNotIn('task_id', state)
+                    return httpx.Response(200, json={'output': {'task_id': task}})
+                if request.url.path.startswith('/api/v1/tasks/'):
+                    task = request.url.path.rsplit('/', 1)[-1]
+                    self.assertEqual(json.loads((folder/'state.json').read_text())['task_id'], task)
+                    if ambiguous == 'query':
+                        raise httpx.ReadTimeout('query lost', request=request)
+                    status = direct_status if task == 'direct-task' else upload_status
+                    output = {'task_status': status, 'code': 'FILE_DOWNLOAD_FAILED'}
+                    if status == 'SUCCEEDED':
+                        output['results'] = [{'subtask_status': 'SUCCEEDED',
+                            'transcription_url': 'https://result.aliyuncs.com/result'}]
+                    return httpx.Response(200, json={'output': output})
+                return httpx.Response(500) if ambiguous == 'result' else httpx.Response(200, json=raw)
+            transport = httpx.MockTransport(handler)
+            real_client = httpx.Client
+            def client_factory(*a, **kw):
+                return real_client(transport=transport)
+            def stage(*a, **kw):
+                saved = json.loads((folder/'state.json').read_text())
+                self.assertEqual(saved['status'], 'AUDIO_STAGING')
+                self.assertNotIn('task_id', saved)
+                if calls:
+                    self.assertTrue(saved['fallback_used'])
+                    self.assertEqual(json.loads((folder/'direct-url-state.json').read_text())['task_id'], 'direct-task')
+                return 'oss://temporary/audio.m4a'
+            media = {'info': {'url': 'https://cdn.test/audio?signature=private', 'protocol': 'm3u8_native'}} if segmented else 'https://cdn.test/audio?signature=private'
+            with patch.object(app, 'ROOT', root), patch.object(app, 'credentials', return_value={'Authorization': 'Bearer test'}), \
+                 patch.dict(os.environ, {'ASR_MODEL': 'qwen-audio-3.1-asr-flash-filetrans', 'BAILIAN_WORKSPACE_ID': ''}), \
+                 patch.object(app, 'resolve', return_value=(source, media)) as resolve, \
+                 patch.object(app, 'stage_for_bailian', side_effect=stage) as staged, \
+                 patch.object(app.httpx, 'Client', side_effect=client_factory), redirect_stdout(io.StringIO()):
+                yield folder, args, calls, resolve, staged
+
+    def test_direct_failure_falls_back_once_and_packages_both_task_evidence(self):
+        with self.fallback_scenario() as (folder, args, calls, resolve, staged):
+            app.prepare(args)
+            self.assertEqual(calls, ['direct-task', 'upload-task'])
+            self.assertEqual(resolve.call_count, 2)
+            staged.assert_called_once()
+            state = json.loads((folder/'state.json').read_text())
+            self.assertEqual(state['status'], 'TRANSCRIPT_READY')
+            self.assertEqual(state['task_id'], 'upload-task')
+            self.assertEqual(state['direct_task_id'], 'direct-task')
+            self.assertTrue(state['fallback_used'])
+            self.assertNotIn('signature=private', (folder/'state.json').read_text())
+            (folder/'report.html').write_text(self.html())
+            app.deliver(folder)
+            archive = next(folder.glob('*.zip'))
+            with zipfile.ZipFile(archive) as z:
+                self.assertEqual(json.loads(z.read('direct-url-state.json'))['task_id'], 'direct-task')
+                self.assertEqual(json.loads(z.read('direct-url-asr-task.json'))['output']['task_status'], 'FAILED')
+            app.prepare(args)
+            self.assertEqual(calls, ['direct-task', 'upload-task'])
+
+    def test_direct_success_does_not_download_or_upload(self):
+        with self.fallback_scenario(direct_status='SUCCEEDED') as (folder, args, calls, resolve, staged):
+            app.prepare(args)
+            self.assertEqual(calls, ['direct-task'])
+            staged.assert_not_called()
+            self.assertEqual(resolve.call_count, 1)
+
+    def test_unknown_submission_or_query_failure_never_triggers_fallback(self):
+        for failure in ('direct-task', 'query', 'reject', 'result'):
+            with self.subTest(failure=failure), self.fallback_scenario(ambiguous=failure,
+                    direct_status='SUCCEEDED' if failure == 'result' else 'FAILED') as (folder, args, calls, resolve, staged):
+                with self.assertRaises(app.Problem): app.prepare(args)
+                staged.assert_not_called()
+                self.assertEqual(calls, ['direct-task'])
+                with self.assertRaises(app.Problem): app.resume_locked(folder, json.loads((folder/'state.json').read_text()), 1)
+                self.assertEqual(calls, ['direct-task'])
+
+    def test_pending_direct_task_times_out_without_upload_fallback(self):
+        with self.fallback_scenario(direct_status='RUNNING') as (folder, args, calls, resolve, staged), \
+             patch.object(app.time, 'monotonic', side_effect=[0, 2]):
+            with self.assertRaisesRegex(app.Problem, '等待结束'): app.prepare(args)
+            staged.assert_not_called()
+            self.assertEqual(calls, ['direct-task'])
+
+    def test_canceled_task_never_triggers_fallback(self):
+        with self.fallback_scenario(direct_status='CANCELED') as (folder, args, calls, resolve, staged):
+            with self.assertRaises(app.Problem): app.prepare(args)
+            staged.assert_not_called()
+            self.assertEqual(calls, ['direct-task'])
+
+    def test_failed_upload_fallback_is_not_repeated_by_resume(self):
+        with self.fallback_scenario(upload_status='FAILED') as (folder, args, calls, resolve, staged):
+            with self.assertRaises(app.Problem): app.prepare(args)
+            before = (folder/'direct-url-state.json').read_bytes()
+            with self.assertRaises(app.Problem): app.resume_locked(folder, json.loads((folder/'state.json').read_text()), 1)
+            self.assertEqual(calls, ['direct-task', 'upload-task'])
+            staged.assert_called_once()
+            self.assertEqual((folder/'direct-url-state.json').read_bytes(), before)
+
+    def test_unknown_upload_submission_is_not_repeated_by_resume(self):
+        with self.fallback_scenario(ambiguous='upload-task') as (folder, args, calls, resolve, staged):
+            with self.assertRaises(app.Problem): app.prepare(args)
+            self.assertEqual(json.loads((folder/'state.json').read_text())['status'], 'SUBMISSION_UNKNOWN')
+            with self.assertRaises(app.Problem): app.resume_locked(folder, json.loads((folder/'state.json').read_text()), 1)
+            self.assertEqual(calls, ['direct-task', 'upload-task'])
+            staged.assert_called_once()
+
+    def test_upload_preparation_failure_is_checkpointed_and_not_retried(self):
+        with self.fallback_scenario() as (folder, args, calls, resolve, staged):
+            staged.side_effect = app.Problem('download failed')
+            with self.assertRaises(app.Problem): app.prepare(args)
+            state = json.loads((folder/'state.json').read_text())
+            self.assertEqual(state['status'], 'AUDIO_STAGING')
+            self.assertNotIn('task_id', state)
+            with self.assertRaises(app.Problem): app.resume_locked(folder, state, 1)
+            self.assertEqual(calls, ['direct-task'])
+            staged.assert_called_once()
+
+    def test_resume_pending_or_failed_direct_task_continues_authorized_fallback(self):
+        for status in ('SUBMITTED', 'ASR_FAILED'):
+            with self.subTest(status=status), self.fallback_scenario() as (folder, args, calls, resolve, staged):
+                folder.mkdir(parents=True)
+                state = {'source': {'video_url': URL, 'duration_seconds': 10}, 'report_mode': 'standard',
+                         'input_mode': 'direct-url', 'upload_fallback_allowed': True, 'max_minutes': 300,
+                         'max_audio_mib': 1024, 'model': 'qwen-audio-3.1-asr-flash-filetrans', 'workspace': '',
+                         'status': status, 'task_id': 'direct-task'}
+                if status == 'ASR_FAILED':
+                    state['provider_task_status'] = 'FAILED'
+                    app.write_json(folder/'asr-task.json', {'output': {'task_status': 'FAILED', 'code': 'FILE_DOWNLOAD_FAILED'}})
+                app.write_json(folder/'state.json', state)
+                app.resume_locked(folder, state, 1)
+                self.assertEqual(calls, ['upload-task'])
+                staged.assert_called_once()
+
+    def test_segmented_audio_skips_direct_submission_and_uses_upload(self):
+        with self.fallback_scenario(segmented=True) as (folder, args, calls, resolve, staged):
+            app.prepare(args)
+            self.assertEqual(calls, ['upload-task'])
+            staged.assert_called_once()
+            self.assertEqual(json.loads((folder/'state.json').read_text())['direct_url_skipped'], 'segmented_audio')
 
     def test_limits_reject_values_outside_requested_bounds_before_work(self):
         for flag, value in [('--max-minutes', '0'), ('--max-minutes', '301'),
