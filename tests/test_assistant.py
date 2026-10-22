@@ -11,6 +11,7 @@ from unittest.mock import patch
 
 import httpx
 import yt_dlp
+from report_delivery import render_markdown
 
 spec = importlib.util.spec_from_file_location("assistant", Path(__file__).parents[1] / "video_assistant.py")
 m = importlib.util.module_from_spec(spec)
@@ -262,9 +263,11 @@ class AssistantTests(unittest.TestCase):
                         + f'<p data-source-units="{source_id}">' + "解释" * 600 + '</p>' + external + '</body></html>')
             for content in [html("S99999"), html("S00001", '<script src="https://evil.test/x.js"></script>')]:
                 (folder / "report.html").write_text(content)
+                (folder / "report.md").write_text(render_markdown(content))
                 with self.assertRaises(m.Problem):
                     m.verify(folder)
             (folder / "report.html").write_text(html("S00001"))
+            (folder / "report.md").write_text(render_markdown(html("S00001")))
             m.verify(folder)
             self.assertEqual(json.loads((folder / "state.json").read_text())["status"], "REPORT_VERIFIED")
 

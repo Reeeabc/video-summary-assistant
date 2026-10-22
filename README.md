@@ -1,92 +1,87 @@
 # 云端视频总结助手
 
-在 Codex Cloud 中发送 B站链接，由百炼直接读取音频直链转写，再由当前 Codex 任务依据原项目模板生成 HTML 阅读报告。电脑可以离线；不要求另一份报告模型 API Key。
+在已配置的 Codex Cloud 环境发送单条 B站链接并要求总结，默认执行：
 
-本项目只准备云端运行所需的代码和指令。部署进度和当前验收见 `VALIDATION.md`；本地测试通过不等于已发布云端环境。
+**B站链接 → 云端下载所选分 P 的独立音频 → 完整性/时长/完整解码校验 → 百炼官方临时上传 → ASR → Codex 生成 HTML 与完整 Markdown 阅读报告。**
+
+默认 `bailian-upload`、standard 模式、最长 **300 分钟**、音频最大 **1024 MiB**。不下载视频画面，不需要自有 OSS 或额外报告模型 API Key。`direct-url` 是手动选项，失败不自动切换模式或另建收费任务。实际验收及本轮非计费检查见 [VALIDATION.md](VALIDATION.md)。
 
 ## 初始化
 
-需要 Python 3.12+。运行 `bash setup.sh` 安装隔离依赖并执行离线测试。
-
-在 Codex Cloud 的 Network secrets 中配置 `DASHSCOPE_API_KEY`，Allowed domains 仅填本次使用的百炼 API 域名。在 Environment variables 中设置 `BAILIAN_WORKSPACE_ID`（北京业务空间 ID）和 `ASR_MODEL=qwen-audio-3.1-asr-flash-filetrans`。业务空间为空时使用官方默认北京域名。项目不自动加载本地 .env 文件。
-
-云端环境创建、网络配置及验收步骤见 [DEPLOY.md](DEPLOY.md)。
-
-解析子进程使用 yt-dlp 官方支持的 `--compat-options no-certifi` 选择系统 CA，
-继承环境的证书与代理配置，始终保持 TLS 证书校验。云端代理 CA 应加入系统信任库，
-不要使用 `--no-check-certificates`。子进程不接收百炼密钥，也不加载个人 Cookie。
-本次 probe 修复、HTTP 412 证据及尚未通过的项目见 [PROBE_DIAGNOSTICS.md](PROBE_DIAGNOSTICS.md)。
-
-项目内的 `bilibili_extractor.py` 在页面缺少初始数据时使用详情 API 回退，
-验证 BV 号及所选分 P 的 cid、时长，再复用固定版本 yt-dlp 的播放信息和格式解析。
-无需修改虚拟环境依赖文件；API 返回错误时立即停止，不自动重试。
-Range 检查会继承 yt-dlp 的公开媒体请求头（包括 User-Agent 和 Referer），
-不会转发 Cookie 或 Authorization；这些请求头只在内存中传递，不写入任务元数据。
-这些媒体请求头不会自动传给百炼。直链模式此前一次实际验收返回 `FILE_DOWNLOAD_FAILED`；
-临时上传模式已完成一次实际转写、HTML 报告与静态校验。浏览器视觉和手机端验收仍待完成，
-不同视频及直链模式的取流结果不能由此保证，详情见 [VALIDATION.md](VALIDATION.md)。
-
-## 可选：百炼官方临时上传
-
-无需配置自有 OSS。此模式在云端临时下载所选分 P 的独立音轨，核对 Content-Length、
-SHA-256、AAC 单音轨及分 P 时长，并用 FFmpeg 完整解码；通过后才向当前模型申请官方上传凭证。
-需要系统安装 `ffmpeg` 和 `ffprobe`。默认下载上限 256 MiB，可用 `--max-audio-mib` 调整至最高 1024 MiB。
-本地音频在成功或失败退出时删除，不保存视频画面；网络或上传结果未知时不自动重试。
-
-仅验证下载和上传，不提交收费转写：
+需要 Python 3.12+，在仓库根目录运行：
 
 ```bash
-.venv/bin/python video_assistant.py upload-check 'BV1gmJX6SExT'
+bash setup.sh
 ```
 
-脱敏结果保存到 `runs/<BV>-p<分P>-upload-check/upload-state.json`，已有记录不覆盖。
-旧的失败转写目录及默认 `direct-url` 模式保持独立。官方临时存储约 48 小时后自动清理，
-文件绑定上传时的模型及主账号，官方不支持上传后查询或下载。
-上传凭证、源直链和 `oss://` 地址仅在内存中使用，不输出、不写入检查点。
-因此 `upload-check` 是验证操作，之后正式转写会重新下载和上传，不能复用此检查中的临时地址。
+脚本检查 Python，必要时通过 apt 安装 FFmpeg/FFprobe 与 CA 证书（需 root 或免交互 sudo），创建 `.venv`、安装固定版本 Python 依赖、检查依赖并运行离线测试。不支持 apt 或没有安装权限时明确停止，须由环境管理员在镜像中预装系统包。
 
-只有用户另行授权收费转写后，才运行：
+系统 CA 默认 `/etc/ssl/certs/ca-certificates.crt`。初始化和程序入口使用该信任库，设置 `SSL_CERT_FILE`、`REQUESTS_CA_BUNDLE`，保留显式配置的有效证书路径。yt-dlp 子进程使用官方 `--compat-options no-certifi` 并继承证书/代理设置，始终验证 TLS。代理 CA 须加入系统信任库，禁止关闭证书验证。
 
-```bash
-.venv/bin/python video_assistant.py prepare 'BV1gmJX6SExT' --input-mode bailian-upload
-```
-
-该模式默认使用带 `-bailian-upload` 后缀的新任务目录，以免覆盖原直链任务；
-提交时添加官方要求的 `X-DashScope-OssResourceResolve: enable`，仍执行提交前检查点和任务 ID 落盘。
-上传 HTTP 200 与 ETag 一致只能验证存储回执，不能证明模型转写成功。
-
-依据：[官方临时存储接口](https://help.aliyun.com/zh/model-studio/get-temporary-file-url/)、
-[当前 ASR 模型 HTTP API](https://help.aliyun.com/zh/model-studio/fun-asr-recorded-speech-recognition-http-api)。
+保留已有安全绑定：`DASHSCOPE_API_KEY` 放 Network secrets，仅允许百炼 API 域名；`BAILIAN_WORKSPACE_ID` 和 `ASR_MODEL=qwen-audio-3.1-asr-flash-filetrans` 放环境变量。业务空间留空使用默认北京 API。程序不自动加载 `.env`，密钥值不写入聊天、源码或初始化脚本。部署与重新发布见 [DEPLOY.md](DEPLOY.md)。
 
 ## 使用
 
-在选定本项目环境的 Codex 云端任务中发送：
+选中本项目环境，新会话只需发送：
 
-> 总结 https://www.bilibili.com/video/BV1gmJX6SExT ，按 AGENTS.md 执行，standard 模式，交付 HTML、转写、字幕和下载包。
+> 总结这个视频：https://www.bilibili.com/video/BV1gmJX6SExT
 
-脚本负责准备来源，Codex 负责阅读、写作和检查：
+[AGENTS.md](AGENTS.md) 规定自动完成转写、阅读、报告和交付；需要速览可加“brief 模式”。脚本准备来源，Codex 按 `vendor/video-report/SKILL.md` 写报告。
 
 ```bash
-# 只检查元数据与音轨：不调用百炼、不下载完整媒体
-.venv/bin/python video_assistant.py probe 'https://www.bilibili.com/video/BV1gmJX6SExT'
-# 可选：取得音轨后以 Range 最多读取 1 KiB；服务器不返回有效 206 时不读取响应体
-.venv/bin/python video_assistant.py probe 'BV1gmJX6SExT' --check-audio-range
-# 提交最多一次云端转写，成功后保存完整来源
-.venv/bin/python video_assistant.py prepare 'https://www.bilibili.com/video/BV1gmJX6SExT'
-# 中断后查询原任务
-.venv/bin/python video_assistant.py resume runs/BV1gmJX6SExT-p1-standard
-# Codex 生成报告后运行静态检查
-.venv/bin/python video_assistant.py verify runs/BV1gmJX6SExT-p1-standard
+# 默认上传模式，成功任务优先复用
+.venv/bin/python video_assistant.py prepare 'BV1gmJX6SExT' --mode standard
+# 以下命令使用输出的 directory，不能假定任务路径
+.venv/bin/python video_assistant.py resume '任务目录'
+# Codex 写好 report.html 后生成完整 report.md、检查并打包
+.venv/bin/python video_assistant.py deliver '任务目录'
+# 重新检查完整交付（要求已有 report.md）
+.venv/bin/python video_assistant.py verify '任务目录'
 ```
 
-运行 `status 任务目录` 查看非敏感检查点。提交结果未知时由用户从百炼控制台核实任务，再 `attach-task 任务目录 原任务ID`。恢复始终使用创建时冻结的模型和业务空间；密钥从当前环境读取，须能访问原账号任务。正常重试使用同一云端聊天及任务目录；新聊天有独立文件系统，须带入原任务目录才能恢复，不能承诺跨聊天自动去重。
+默认新任务目录 `runs/<BV>-p<分P>-<模式>-bailian-upload/`，URL 的 `p` 参数选择分 P。`--max-minutes` 接受 1–300，`--max-audio-mib` 接受 1–1024，可主动收紧。服务端临时上传策略若更小，程序在上传前检查实际文件大小，报告字节上下限并停止，不绕过限制。2026-10-22 只读查询当前模型策略上限为 1,073,741,824 字节（1024 MiB），不保证未来不变。
 
-## 输出
+以下诊断不提交 ASR：
 
-`runs/` 保存每次任务的 HTML、TXT、SRT、完整来源映射、脱敏原始结果和任务检查点。密钥及完整签名媒体地址不保存。产物不进入源代码仓库；结束前下载任务 ZIP 或保存到用户指定的私有存储，不能把临时任务文件当作永久资料库。
+```bash
+.venv/bin/python video_assistant.py probe 'BV1gmJX6SExT'
+# 有效 206 时最多读取 1 KiB，不下载完整媒体
+.venv/bin/python video_assistant.py probe 'BV1gmJX6SExT' --check-audio-range
+# 验证完整独立音频下载、解码与官方上传回执，随后清理本地音频
+.venv/bin/python video_assistant.py upload-check 'BV1gmJX6SExT'
+```
 
-原始 ASR 可能识别错术语；报告只理解转写，不能保证覆盖只在画面里出现的信息。默认单次上限 60 分钟，支持明确指定分 P；暂不处理短链接、合集批量、登录受限视频或无独立 AAC 音轨的视频。直链在当前环境已实测成功，Codex 云端出口仍须单独验证。抓取失败时保留证据，不自动切换到下载/OSS 或另建计费任务。
+手动直链模式为 `prepare 视频链接 --input-mode direct-url`。它把音频直链交给百炼，不假定云端 User-Agent/Referer 会传给百炼。此前一次实际直链任务 `FILE_DOWNLOAD_FAILED`，临时上传模式随后完成实际转写与报告；云端取流成功不能证明百炼也能取流。
+
+## 恢复、复用与安全
+
+`prepare` 在获取新直链、凭据和计费前寻找可访问的成功任务，检查来源完整性；不同阅读模式也复用原转写。始终使用返回目录，复用不会新建 ASR。`status 目录` 查看脱敏检查点。提交前持久化 `SUBMISSION_UNKNOWN`，拿到任务 ID 立即保存，后续仅查询原任务。
+
+未知提交不得自动重提，由用户从百炼控制台核实原任务，再 `attach-task 目录 原任务ID`。失败任务不自动另建收费任务；只有用户明确授权新尝试后，才用 `--new-attempt --output 新目录`，保留旧证据。该参数不能绕过未知提交。恢复使用创建时冻结的模型和业务空间，当前密钥须能访问原任务。
+
+新会话可能有独立文件系统，不能承诺跨会话自动发现旧任务。结束前下载完整 ZIP；复用时解压回 `runs/`，或用 `prepare 视频链接 --reuse-from 已解压的任务目录`。导入错误、成功来源损坏时停止，不以重新计费替代修复。
+
+上传流程核对 Content-Length、SHA-256、单 AAC 音轨、时长及 FFmpeg 完整解码，通过后向当前模型申请官方临时凭证；检查上传 HTTP 200 与 ETag，提交添加 `X-DashScope-OssResourceResolve: enable`。凭证、源签名直链和 `oss://` URI 只在内存使用，API Authorization 仅发往百炼 API。本地临时音频在正常或错误退出时清理。官方临时文件约 48 小时清理，不提供独立查询/下载；`upload-check` 不持久化临时地址，正式转写需重新上传。
+
+页面缺少初始数据时，项目内 `bilibili_extractor.py` 使用详情 API 回退，校验 BV/分 P，再复用固定版本 yt-dlp 播放信息与格式提取，不修改虚拟环境依赖。失败保存脱敏证据后停止，不反复请求。历史网络诊断见 [PROBE_DIAGNOSTICS.md](PROBE_DIAGNOSTICS.md)。
+
+## 默认交付
+
+| 文件 | 用途 |
+| --- | --- |
+| `report.html` | 项目模板生成的阅读报告 |
+| `report.md` | 对应 HTML 的完整阅读报告，含章节、必要表格、时间范围、图示文字和来源标记 |
+| `transcript.srt` | 完整字幕 |
+| `<BV>-p<分P>-<模式>-report.zip` | 全部报告与原始资料下载包 |
+
+ZIP 还包含原始 `transcript.txt`、`transcript.md`、`input.json`、`source-units.json`、`state.json`、`asr-task.json`、脱敏 `asr-raw.json`、`report-check.json` 和可用的 `review.json`。**`report.md` 是阅读报告，`transcript.md` 是原始转写**，不能互相代替。
+
+`deliver` 检查 Markdown 实际存在且对应 HTML、来源 ID 有效，再逐字节检查归档内容。内容仍须人工核对来源；浏览器视觉验收无法完成时写入 `review.json`，继续静态检查和交付，不声称视觉验收通过。
+
+`runs/` 和临时音频不进入 Git。保留报告、原始资料和任务证据供下载，处理后清理本地音频；临时工作区不是永久资料库。ASR 可能误识别术语，流程无法覆盖只在画面中出现的信息。暂不处理短链接、批量合集、需登录或无独立 AAC 音轨的视频。
 
 ## 来源
 
-`vendor/video-report/` 完整保留 [imexlovery/video-report-agent](https://github.com/imexlovery/video-report-agent) 的报告 Skill、两种模板与参考文件，固定提交及文件校验见 `UPSTREAM.json`。未修改其视觉资源。上游仓库此次快照未发现 LICENSE；本包不额外授予上游内容的许可，先用于用户自己的私有云端环境，公开分发前核实上游许可。
+`vendor/video-report/` 保留 [imexlovery/video-report-agent](https://github.com/imexlovery/video-report-agent) 的 Skill、模板和参考文件，提交及校验见 `UPSTREAM.json`。上游快照未发现 LICENSE，本包不额外授予上游许可，公开分发前须核实。
+
+百炼依据：[官方临时存储](https://help.aliyun.com/zh/model-studio/get-temporary-file-url/)、[ASR HTTP API](https://help.aliyun.com/zh/model-studio/fun-asr-recorded-speech-recognition-http-api)。

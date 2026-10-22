@@ -7,7 +7,8 @@ ROOT = Path(__file__).resolve().parent
 FILES = [".gitignore", ".env.example", "AGENTS.md", "README.md", "DEPLOY.md", "VALIDATION.md",
          "UPSTREAM.json", "requirements.txt", "setup.sh", "video_assistant.py", "bundle.py",
          "bilibili_extractor.py", "tests/test_assistant.py", "tests/test_bilibili_extractor.py",
-         "PROBE_DIAGNOSTICS.md", "temporary_audio.py", "tests/test_temporary_audio.py"]
+         "PROBE_DIAGNOSTICS.md", "temporary_audio.py", "tests/test_temporary_audio.py",
+         "runtime_config.py", "report_delivery.py", "tests/test_workflow.py"]
 
 
 def bundle(destination):

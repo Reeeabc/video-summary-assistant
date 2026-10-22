@@ -5,6 +5,7 @@ This module never submits transcription. URLs and upload credentials stay in mem
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+import base64
 import hashlib
 import json
 import math
@@ -17,6 +18,7 @@ from urllib.parse import urlsplit
 import uuid
 
 import httpx
+from runtime_config import configure_ca
 
 
 class AudioUploadError(Exception):
@@ -111,7 +113,26 @@ def get_policy(client, api_base, auth, model):
     return policy
 
 
+def policy_size_bounds(policy):
+    try:
+        decoded = json.loads(base64.b64decode(policy['policy'], validate=True))
+        conditions = decoded['conditions']
+        if not isinstance(conditions, list):
+            raise ValueError
+        bounds = [c for c in conditions if isinstance(c, list) and c and c[0] == 'content-length-range']
+        if any(len(c) != 3 or type(c[1]) is not int or type(c[2]) is not int or not 0 <= c[1] <= c[2] for c in bounds):
+            raise ValueError
+        return (max(c[1] for c in bounds), min(c[2] for c in bounds)) if bounds else (0, None)
+    except (ValueError, KeyError, TypeError):
+        raise AudioUploadError('policy', 'invalid server size policy; not uploading') from None
+
+
 def upload_audio(client, policy, path, md5):
+    lower, upper = policy_size_bounds(policy)
+    size = path.stat().st_size
+    if size < lower or (upper is not None and size > upper):
+        raise AudioUploadError('upload', 'audio violates server policy size limit; not uploading',
+            file_bytes=size, server_min_bytes=lower, server_max_bytes=upper)
     key = policy['upload_dir'].rstrip('/') + '/' + path.name
     fields = {'OSSAccessKeyId': policy['oss_access_key_id'], 'Signature': policy['signature'],
         'policy': policy['policy'], 'x-oss-object-acl': policy['x_oss_object_acl'],
@@ -123,17 +144,20 @@ def upload_audio(client, policy, path, md5):
     except httpx.HTTPError:
         raise AudioUploadError('upload', 'upload result unknown; no automatic retry') from None
     if response.status_code != 200:
-        raise AudioUploadError('upload', 'storage rejected upload', http_status=response.status_code)
+        code = re.search(r'<Code>([A-Za-z0-9_.-]{1,80})</Code>', response.text[:4096])
+        raise AudioUploadError('upload', 'storage rejected upload; not retried', http_status=response.status_code,
+                               provider_code=code[1] if code else 'unknown', server_max_bytes=upper)
     etag = response.headers.get('etag', '').strip('"').lower()
     if etag and etag != md5:
         raise AudioUploadError('upload', 'storage checksum mismatch; not retried')
-    return 'oss://' + key, {'http_status': 200, 'server_checksum_verified': bool(etag),
+    return 'oss://' + key, {'http_status': 200, 'server_checksum_verified': bool(etag), 'server_max_bytes': upper,
         'expires_at': (datetime.now(timezone.utc) + timedelta(hours=48)).isoformat()}
 
 
 def stage_audio(direct, headers, expected_duration, model, api_base, auth,
-                *, max_bytes=256 * 1024 * 1024, event=lambda status, details: None):
+                *, max_bytes=1024 * 1024 * 1024, event=lambda status, details: None):
     """Upload validation only; return a private URI, delete local audio on all exits."""
+    configure_ca()
     try:
         with tempfile.TemporaryDirectory(prefix='bailian-audio-') as directory:
             path = Path(directory) / (uuid.uuid4().hex + '.m4a')

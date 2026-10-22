@@ -10,6 +10,7 @@ from urllib.parse import parse_qs, urlsplit
 import yt_dlp
 from yt_dlp.extractor.bilibili import BiliBiliIE
 from yt_dlp.utils import ExtractorError
+from runtime_config import configure_ca
 
 
 def media_headers(*sources):
@@ -142,6 +143,7 @@ class QuietLogger:
 
 
 def main():
+    configure_ca()
     parsed = yt_dlp.parse_options(sys.argv[1:])
     if len(parsed.urls) != 1:
         raise ExtractionFailure('input', 'one video URL required')

@@ -1,4 +1,5 @@
 import hashlib
+import base64
 import json
 from pathlib import Path
 import subprocess
@@ -17,7 +18,8 @@ DATA = b'audio-only-fixture'
 MD5 = hashlib.md5(DATA).hexdigest()
 POLICY = {'upload_host': 'https://temporary.oss-cn-beijing.aliyuncs.com',
           'upload_dir': 'dashscope-instant/test', 'oss_access_key_id': 'private-key',
-          'signature': 'private-signature', 'policy': 'private-policy',
+          'signature': 'private-signature', 'policy': base64.b64encode(json.dumps({'conditions': [
+              ['content-length-range', 0, 1024]]}).encode()).decode(),
           'x_oss_object_acl': 'private', 'x_oss_forbid_overwrite': 'true'}
 
 
@@ -119,6 +121,18 @@ class TemporaryAudioTests(unittest.TestCase):
                 upload.upload_audio(client, POLICY, path, MD5)
             self.assertEqual(len(calls), 1)
             self.assertNotIn('credentials', str(error.exception))
+
+    def test_smaller_server_limit_is_reported_before_upload_without_workaround(self):
+        small = {**POLICY, 'policy': base64.b64encode(json.dumps({'conditions': [
+            ['content-length-range', 0, 8]]}).encode()).decode()}
+        with tempfile.TemporaryDirectory() as td, httpx.Client(transport=httpx.MockTransport(
+                lambda request: self.fail('must not attempt oversized upload'))) as client:
+            path = Path(td) / 'audio.m4a'
+            path.write_bytes(DATA)
+            with self.assertRaises(upload.AudioUploadError) as caught:
+                upload.upload_audio(client, small, path, MD5)
+            self.assertEqual(caught.exception.details['server_max_bytes'], 8)
+            self.assertEqual(caught.exception.details['file_bytes'], len(DATA))
 
     def test_upload_check_has_no_asr_route_and_removes_local_audio(self):
         calls, local_paths = [], []

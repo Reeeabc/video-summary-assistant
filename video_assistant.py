@@ -14,14 +14,19 @@ import math
 import os
 from pathlib import Path
 import re
+import shutil
 import subprocess
 import sys
 import time
 from urllib.parse import parse_qs, urlsplit
 
 import httpx
+from report_delivery import DeliveryError, markdown_source_ids, render_markdown, write_archive
+from runtime_config import configure_ca
 
 ROOT = Path(__file__).resolve().parent
+DEFAULT_MAX_MINUTES = 300
+DEFAULT_AUDIO_MIB = 1024
 MODELS = {"qwen-audio-3.1-asr-flash-filetrans", "qwen-audio-3.0-asr-flash-filetrans",
           "paraformer-v2", "fun-asr"}
 
@@ -64,7 +69,7 @@ def canonical(value):
     return f"https://www.bilibili.com/video/{bvid}?p={page}", f"{bvid}-p{page}"
 
 
-def resolve(url, max_minutes, *, media_headers=None):
+def resolve(url, max_minutes=DEFAULT_MAX_MINUTES, *, media_headers=None):
     # The extractor subprocess does not receive the ASR credential environment.
     env = {k: v for k, v in os.environ.items() if k in {
         "PATH", "HOME", "TMPDIR", "LANG", "LC_ALL", "SSL_CERT_FILE", "SSL_CERT_DIR",
@@ -363,6 +368,77 @@ def upload_check(args):
             "transcription_submitted": False, "directory": str(folder)}, ensure_ascii=False))
 
 
+def existing_tasks(url, reuse_from=None):
+    paths = set((ROOT / 'runs').rglob('state.json'))
+    if reuse_from is not None:
+        supplied = reuse_from.resolve() / 'state.json'
+        if not supplied.is_file():
+            raise Problem('指定复用目录缺少 state.json；未提交转写。')
+        paths.add(supplied)
+    result = []
+    for path in sorted(paths):
+        if path.is_symlink():
+            continue
+        try:
+            state = json.loads(path.read_text())
+            if state.get('source', {}).get('video_url') == url:
+                result.append((path.parent, state))
+        except (OSError, ValueError, AttributeError):
+            if reuse_from is not None and path.parent == reuse_from.resolve():
+                raise Problem('指定复用目录的状态无效；未提交转写。') from None
+    if reuse_from is not None and not any(p == reuse_from.resolve() and s.get('status') in {
+            'TRANSCRIPT_READY', 'REPORT_VERIFIED'} for p, s in result):
+        raise Problem('指定复用目录不属于该视频的成功任务；未提交转写。')
+    return result
+
+
+def intact_sources(folder, state):
+    names = ('transcript.txt', 'transcript.md', 'transcript.srt', 'source-units.json', 'input.json',
+             'asr-task.json', 'asr-raw.json')
+    try:
+        if not all((folder / n).is_file() and not (folder / n).is_symlink() for n in names):
+            return False
+        units = json.loads((folder / 'source-units.json').read_text())
+        digest = hashlib.sha256('\n'.join(u['text'] for u in units).encode()).hexdigest()
+        return (digest == state['transcript_sha256'] and all(
+            hashlib.sha256((folder / n).read_bytes()).hexdigest() == value
+            for n, value in state.get('source_checksums', {}).items()))
+    except (OSError, ValueError, KeyError, TypeError):
+        return False
+
+
+def reuse_success(tasks, folder, args):
+    successes = [(p, s) for p, s in tasks if s.get('status') in {'TRANSCRIPT_READY', 'REPORT_VERIFIED'}]
+    valid = [(p, s) for p, s in successes if intact_sources(p, s)]
+    if successes and not valid:
+        raise Problem('已有成功任务的来源文件缺失或校验失败；请恢复资料，不自动重新计费。')
+    supplied = getattr(args, 'reuse_from', None)
+    if supplied is not None:
+        valid = [(p, s) for p, s in valid if p == supplied.resolve()]
+        if not valid:
+            raise Problem('指定复用任务的来源校验失败；不自动重新计费。')
+    valid.sort(key=lambda item: item[1].get('report_mode') != args.mode)
+    if not valid:
+        return False
+    source_folder, state = valid[0]
+    if state.get('report_mode') == args.mode:
+        print(json.dumps({'status': state['status'], 'directory': str(source_folder), 'reused': True}, ensure_ascii=False))
+        return True
+    # ASR is independent of reading mode. Create new report sources, never a new task.
+    state = {**state, 'status': 'TRANSCRIPT_READY', 'report_mode': args.mode, 'reused_from': str(source_folder)}
+    for name in ('asr-task.json', 'asr-raw.json', 'transcript.txt', 'transcript.md',
+                 'transcript.srt', 'source-units.json', 'input.json'):
+        shutil.copyfile(source_folder / name, folder / name)
+    input_data = json.loads((folder / 'input.json').read_text())
+    input_data['report_mode'] = args.mode
+    write_json(folder / 'input.json', input_data)
+    state['source_checksums'] = {n: hashlib.sha256((folder / n).read_bytes()).hexdigest()
+                                for n in state['source_checksums']}
+    write_json(folder / 'state.json', state)
+    print(json.dumps({'status': 'TRANSCRIPT_READY', 'directory': str(folder), 'reused': True}, ensure_ascii=False))
+    return True
+
+
 def prepare(args):
     url, identity = canonical(args.url)
     suffix = "-bailian-upload" if args.input_mode == "bailian-upload" else ""
@@ -371,10 +447,21 @@ def prepare(args):
         path = folder / "state.json"
         if path.exists():
             state = json.loads(path.read_text())
-            if (state["source"]["video_url"] != url or state["report_mode"] != args.mode
-                    or state.get("input_mode", "direct-url") != args.input_mode):
+            if state["source"]["video_url"] != url or state["report_mode"] != args.mode:
                 raise Problem("输出目录属于其他视频或模式，请使用独立目录。")
+            if state.get('status') in {'TRANSCRIPT_READY', 'REPORT_VERIFIED'} and not intact_sources(folder, state):
+                raise Problem('已有成功任务的来源校验失败；不自动重新计费。')
             return resume_locked(folder, state, args.wait_seconds)
+        tasks = existing_tasks(url, getattr(args, 'reuse_from', None))
+        if reuse_success(tasks, folder, args):
+            return
+        for task_folder, old in tasks:
+            if old.get('status') == 'SUBMISSION_UNKNOWN':
+                raise Problem(f'已有提交结果未知的任务：{task_folder}；先核实并绑定原任务，不得自动重提。')
+            if old.get('task_id') and old.get('status') not in {'ASR_FAILED', 'SUBMIT_REJECTED'}:
+                raise Problem(f'已有任务待查询：{task_folder}；请用 resume，不另建任务。')
+            if old.get('status') in {'ASR_FAILED', 'SUBMIT_REJECTED', 'AUDIO_STAGING'} and not getattr(args, 'new_attempt', False):
+                raise Problem('已有失败或中断任务；须明确授权后用独立 --output 和 --new-attempt，不自动另建收费任务。')
         headers = credentials()
         model = os.environ.get("ASR_MODEL", "qwen-audio-3.1-asr-flash-filetrans")
         if model not in MODELS:
@@ -448,36 +535,65 @@ def verify(folder):
             or not parsed.source_ids or not parsed.source_ids <= known
             or state["source"]["video_url"] not in html):
         raise Problem("HTML 静态检查失败：检查来源 ID、完整来源链接、占位符及外部资源。")
+    if not (folder / 'report.md').is_file():
+        raise Problem('缺少完整 Markdown 报告 report.md；运行 deliver 生成并打包。')
+    markdown = (folder / 'report.md').read_text(encoding='utf-8')
+    try:
+        expected = render_markdown(html)
+    except DeliveryError as exc:
+        raise Problem(str(exc)) from None
+    md_ids = markdown_source_ids(markdown)
+    if markdown != expected or not md_ids or md_ids != parsed.source_ids or not md_ids <= known:
+        raise Problem('Markdown 与 HTML 不对应或来源标记无效；重新运行 deliver。')
     check = {"static_check": "passed", "source_binding_ids": len(parsed.source_ids),
              "content_and_visual_review": "Agent must separately review source fidelity and layout",
-             "report_sha256": hashlib.sha256(html.encode()).hexdigest()}
+             "report_sha256": hashlib.sha256(html.encode()).hexdigest(),
+             "markdown_report_sha256": hashlib.sha256(markdown.encode()).hexdigest(),
+             "markdown_source_binding_ids": len(md_ids), "markdown_matches_html": True}
     write_json(folder / "report-check.json", check)
     state["status"] = "REPORT_VERIFIED"
     write_json(folder / "state.json", state)
     print(json.dumps(check, ensure_ascii=False))
 
 
+def deliver(folder):
+    try:
+        html = (folder / 'report.html').read_text(encoding='utf-8')
+        (folder / 'report.md').write_text(render_markdown(html), encoding='utf-8')
+        verify(folder)
+        state = json.loads((folder / 'state.json').read_text())
+        _, identity = canonical(state['source']['video_url'])
+        archive = write_archive(folder, identity + '-' + state['report_mode'] + '-report.zip')
+    except DeliveryError as exc:
+        raise Problem(str(exc)) from None
+    print(json.dumps({'delivery': 'ready', 'archive': str(archive),
+        'primary_files': ['report.html', 'report.md', 'transcript.srt', archive.name]}, ensure_ascii=False))
+
+
 def main():
+    configure_ca()
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
-    p = commands.add_parser("prepare", help="解析直链、提交一次转写、保存报告来源")
+    p = commands.add_parser("prepare", help="默认下载验证独立音频并临时上传，提交一次转写，保存报告来源")
     p.add_argument("url")
     p.add_argument("--mode", choices=["standard", "brief"], default="standard")
     p.add_argument("--output", type=Path)
-    p.add_argument("--max-minutes", type=int, default=60)
+    p.add_argument("--max-minutes", type=int, default=DEFAULT_MAX_MINUTES)
     p.add_argument("--wait-seconds", type=int, default=900)
-    p.add_argument("--input-mode", choices=["direct-url", "bailian-upload"], default="direct-url")
-    p.add_argument("--max-audio-mib", type=int, default=256)
+    p.add_argument("--input-mode", choices=["direct-url", "bailian-upload"], default="bailian-upload")
+    p.add_argument("--max-audio-mib", type=int, default=DEFAULT_AUDIO_MIB)
+    p.add_argument('--reuse-from', type=Path, help='优先复用已导入的成功任务目录')
+    p.add_argument('--new-attempt', action='store_true', help='仅在明确授权重试后使用；未知提交仍禁止重提')
     p = commands.add_parser("upload-check", help="仅下载验证独立音频并上传官方临时存储，不提交转写")
     p.add_argument("url")
     p.add_argument("--output", type=Path)
-    p.add_argument("--max-minutes", type=int, default=60)
-    p.add_argument("--max-audio-mib", type=int, default=256)
+    p.add_argument("--max-minutes", type=int, default=DEFAULT_MAX_MINUTES)
+    p.add_argument("--max-audio-mib", type=int, default=DEFAULT_AUDIO_MIB)
     p = commands.add_parser("probe", help="仅解析元数据和音轨，不提交百炼或下载媒体")
     p.add_argument("url")
-    p.add_argument("--max-minutes", type=int, default=60)
+    p.add_argument("--max-minutes", type=int, default=DEFAULT_MAX_MINUTES)
     p.add_argument("--check-audio-range", action="store_true", help="用 Range 最多读取 1 KiB 验证音轨")
-    for name in ("resume", "status", "verify", "attach-task"):
+    for name in ("resume", "status", "verify", "deliver", "attach-task"):
         p = commands.add_parser(name)
         p.add_argument("folder", type=Path)
         if name == "resume":
@@ -489,6 +605,8 @@ def main():
         raise Problem("等待时长必须为正；单次视频上限支持 1–300 分钟。")
     if not 1 <= getattr(args, "max_audio_mib", 1) <= 1024:
         raise Problem("临时音频大小上限须为 1–1024 MiB。")
+    if getattr(args, 'new_attempt', False) and args.output is None:
+        raise Problem('新的收费尝试必须显式指定独立 --output，保留旧任务证据。')
     if args.command == "prepare":
         prepare(args)
     elif args.command == "upload-check":
@@ -512,6 +630,8 @@ def main():
                 resume_locked(args.folder, state, args.wait_seconds)
             elif args.command == "verify":
                 verify(args.folder)
+            elif args.command == 'deliver':
+                deliver(args.folder)
             elif args.command == "attach-task":
                 if state.get("task_id") or not re.fullmatch(r"[A-Za-z0-9_-]+", args.task_id):
                     raise Problem("已有任务 ID 或新 ID 格式无效，未修改。")
