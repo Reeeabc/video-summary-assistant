@@ -6,13 +6,15 @@
 
 在环境设置中选择本仓库与 `main`，Setup command 填 **`bash setup.sh`**。保留现有网络、变量和密钥安全绑定，不复制或打印密钥值。
 
-- Python 3.12+；固定 Python 依赖见 `requirements.txt`。
+- Python 3.12+；固定依赖见 requirements.txt，新增 Deno 2.9.8、yt-dlp-ejs 0.8.0（YouTube 官方 JS 挑战支持）和 pycryptodomex 3.24.1（HLS AES）。setup 在 venv 安装并检查运行时，不依赖手工安装 Node，不启用远程 JS 组件。
 - 系统包 `ffmpeg`（提供 FFmpeg/FFprobe）和 `ca-certificates`。缺少时 setup 使用 apt 安装，需要 root 或免交互 sudo；其他镜像须管理员预装。
 - 系统 CA 默认 `/etc/ssl/certs/ca-certificates.crt`，代理 CA 须受信任。保留显式 `SSL_CERT_FILE`/`REQUESTS_CA_BUNDLE`，证书路径须有效。程序与 yt-dlp 子进程始终验证 TLS，使用官方 `no-certifi` 选项。
 - 环境变量 `ASR_MODEL=qwen-audio-3.1-asr-flash-filetrans` 和现有 `BAILIAN_WORKSPACE_ID`；后者留空使用默认北京 API。
 - Network secret `DASHSCOPE_API_KEY`：只允许现有百炼 API 主机（北京业务空间域名或默认 `dashscope.aliyuncs.com`），不扩大到 B站、CDN 或存储域名。
 
-网络须支持依赖源、B站页面/API/音频 CDN、百炼 API、官方临时上传及 ASR 结果域名。典型目的地是 `pypi.org`、`files.pythonhosted.org`、`bilibili.com` 子域、实际 `bilivideo.com`/`bilivideo.cn` CDN、`<业务空间ID>.cn-beijing.maas.aliyuncs.com` 和凭证返回的阿里云临时存储主机。沿用现有策略，必要时只补充真实所需目的地。安装系统包还需要发行版 apt 源。上传使用返回的表单凭证，不携带 API Bearer，不需要自有 OSS。
+网络须支持依赖源、B站/YouTube/Vimeo 页面、API、音频 CDN，百炼 API、官方临时上传及 ASR 结果域名。典型目的地是 `pypi.org`、`files.pythonhosted.org`、`bilibili.com` 子域、实际 `bilivideo.com`/`bilivideo.cn` CDN、`<业务空间ID>.cn-beijing.maas.aliyuncs.com` 、youtube.com/youtu.be、实际 youtubei.googleapis.com/googlevideo.com 音频主机、vimeo.com/player.vimeo.com、实际 vimeocdn.com/akamaized.net 音频主机，以及凭证返回的阿里云临时存储主机。沿用现有策略，必要时只补充真实所需目的地。安装系统包还需要发行版 apt 源。上传使用返回的表单凭证，不携带 API Bearer，不需要自有 OSS。
+
+当前 YouTube 样本在代理 CONNECT 遇 403；Vimeo 提取器提示 web 客户端需登录，具体证据及后续样本条件见 PLATFORMS.md。不要通过改代理、关闭 TLS、导入 Cookie 或更换客户端绕过；环境网络变化应走支持的配置流程。
 
 初始化只检查依赖、CA 和离线测试，**不要在 setup 调用 prepare 或新建收费 ASR**。
 
@@ -46,7 +48,7 @@ git diff --check
 2. **Save → Rebuild/更新环境 → Publish**（以当前界面为准），等待初始化成功及 `Environment published`。无单独重建按钮则按界面提供的更新/发布流程完成。
 3. 新建会话并选择该环境。需要复用旧结果时导入原完整 ZIP，不为环境更新重新转写成功视频。
 
-新会话最简提示词：`总结这个视频：https://www.bilibili.com/video/BV……`。默认官方临时上传，300 分钟/1024 MiB，交付 HTML、完整 Markdown、SRT 和 ZIP；实际上传策略更小时报告限制并停止。
+新会话最简提示词：`总结这个视频：〈B站 / YouTube / Vimeo 单视频链接〉`。新平台未通过线上验收前，先用 `只做 audio-check，不上传、不提交 ASR：〈链接〉` 验证；阻断则停止，新增收费验收单独授权。默认官方临时上传，300 分钟/1024 MiB，交付 HTML、完整 Markdown、SRT 和 ZIP；实际上传策略更小时报告限制并停止。
 
 源码包使用白名单，密钥、上传凭证、签名地址、音频、runs、虚拟环境和诊断脚本不提交。报告须下载留存，新会话不保证继承运行资料。未知/失败任务恢复规则见 README，禁止清空状态或换目录自动新增收费任务。
 

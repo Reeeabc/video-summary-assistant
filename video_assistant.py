@@ -1,6 +1,6 @@
-"""Bilibili direct audio -> durable Bailian task -> sources for a Codex report.
+"""Public single-video audio -> durable Bailian task -> sources for a Codex report.
 
-No report-model API or personal browser sessions. Optional temporary audio upload.
+No report-model API or personal browser sessions. Official temporary upload by default.
 """
 from __future__ import annotations
 
@@ -18,9 +18,10 @@ import shutil
 import subprocess
 import sys
 import time
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import urlsplit
 
 import httpx
+from platforms import Problem, parse_video
 from report_delivery import DeliveryError, content_stem, markdown_source_ids, render_markdown, report_paths, write_archive
 from runtime_config import configure_ca
 
@@ -31,8 +32,6 @@ MODELS = {"qwen-audio-3.1-asr-flash-filetrans", "qwen-audio-3.0-asr-flash-filetr
           "paraformer-v2", "fun-asr"}
 
 
-class Problem(Exception):
-    """A bounded message safe to display without URLs, response bodies, or secrets."""
 
 
 def redact(value):
@@ -55,82 +54,22 @@ def write_json(path, value):
 
 
 def canonical(value):
-    if re.fullmatch(r"BV[0-9A-Za-z]{10}", value):
-        value = "https://www.bilibili.com/video/" + value
-    p = urlsplit(value)
-    match = re.fullmatch(r"/video/(BV[0-9A-Za-z]{10})/?", p.path)
-    if (p.scheme != "https" or p.hostname not in {"www.bilibili.com", "bilibili.com"}
-            or p.netloc not in {"www.bilibili.com", "bilibili.com"} or p.fragment or not match):
-        raise Problem("请提供完整 HTTPS B站 BV 视频链接或 BV 号。")
-    pages = parse_qs(p.query, keep_blank_values=True).get("p", ["1"])
-    if len(pages) != 1 or not re.fullmatch(r"[1-9][0-9]{0,4}", pages[0]):
-        raise Problem("分 P 参数无效。")
-    bvid, page = match[1], int(pages[0])
-    return f"https://www.bilibili.com/video/{bvid}?p={page}", f"{bvid}-p{page}"
+    ref = parse_video(value)
+    return ref.url, ref.identity
 
 
 def resolve(url, max_minutes=DEFAULT_MAX_MINUTES, *, media_headers=None):
-    # The extractor subprocess does not receive the ASR credential environment.
-    env = {k: v for k, v in os.environ.items() if k in {
-        "PATH", "HOME", "TMPDIR", "LANG", "LC_ALL", "SSL_CERT_FILE", "SSL_CERT_DIR",
-        "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE",
-        "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY",
-        "http_proxy", "https_proxy", "all_proxy", "no_proxy"}}
-    # yt-dlp otherwise prefers certifi and ignores the environment's system CA.
-    # This supported option selects system trust; TLS verification stays enabled.
-    command = [sys.executable, str(ROOT / "bilibili_extractor.py"), "--ignore-config",
-               "--compat-options", "no-certifi", "--no-playlist",
-               "--skip-download", "--dump-single-json", "--socket-timeout", "15",
-               "--retries", "0", "--extractor-retries", "0", url]
-    try:
-        result = subprocess.run(command, env=env, capture_output=True, text=True,
-                                timeout=90, check=False)
-        if result.returncode:
-            # Never expose extractor stderr: it may contain cookies or signed URLs.
-            error = result.stderr or ""
-            diagnostic = next((line.removeprefix("BILI_DIAGNOSTIC ") for line in error.splitlines()
-                               if line.startswith("BILI_DIAGNOSTIC ")), None)
-            if diagnostic:
-                detail = json.loads(diagnostic)
-                # The project adapter emits a bounded, sanitized diagnostic object.
-                raise Problem("视频解析失败；未提交百炼。" + json.dumps(detail, ensure_ascii=False))
-            if "CERTIFICATE_VERIFY_FAILED" in error:
-                raise Problem("视频解析的 TLS 证书校验失败；请检查系统 CA 配置，勿关闭校验。未提交百炼。")
-            if "HTTP Error 412" in error:
-                raise Problem("视频解析请求返回 HTTP 412；需核实站点或代理响应，不自动重试。未提交百炼。")
-            if "Unable to extract initial state" in error:
-                raise Problem("视频页面初始数据解析失败；需检查页面响应及 yt-dlp 版本。未提交百炼。")
-            raise Problem("视频解析失败；请检查站点响应、网络和 yt-dlp 版本。未提交百炼。")
-        info = json.loads(result.stdout)
-    except (OSError, subprocess.TimeoutExpired, ValueError):
-        raise Problem("视频解析失败；未提交百炼。请检查云端网络权限。") from None
-    if not isinstance(info, dict) or info.get("_type") in {"playlist", "multi_video"}:
-        raise Problem("视频解析失败；未提交百炼。不支持登录受限视频或合集批量处理。")
-    duration = info.get("duration")
-    if (isinstance(duration, bool) or not isinstance(duration, (int, float))
-            or not math.isfinite(duration) or not 0 < duration <= max_minutes * 60):
-        raise Problem(f"时长缺失或超过本次 {max_minutes} 分钟上限；未提交百炼。")
-    audios = [f for f in info.get("formats", []) if f.get("vcodec") == "none"
-              and f.get("acodec") == "mp4a.40.2" and f.get("url")]
-    if not audios:
-        raise Problem("没有找到可用的独立 AAC 音频直链；未下载媒体或提交百炼。")
-    audio = next((f for f in audios if f.get("format_id") == "30232"), audios[0])
-    media = urlsplit(audio["url"])
-    if media.scheme != "https" or media.username or media.password:
-        raise Problem("媒体直链不符合 HTTPS 要求；未提交百炼。")
-    metadata = {"video_url": url, "video_title": info.get("title", ""),
-                "uploader": info.get("uploader", ""), "duration_seconds": duration,
-                "audio_format_id": audio.get("format_id"), "audio_codec": audio.get("acodec")}
-    if media_headers is not None and isinstance(audio.get("http_headers"), dict):
-        # Headers travel in memory, never in source metadata or task checkpoints.
-        media_headers.update({k.lower(): v for k, v in audio["http_headers"].items()
-            if k.lower() in {"user-agent", "referer", "origin", "accept", "accept-language", "sec-fetch-mode"}
-            and isinstance(v, str)})
-    return metadata, audio["url"]
+    ref = parse_video(url)
+    if ref.platform == 'bilibili':
+        from bilibili_media import resolve_bilibili
+        return resolve_bilibili(ref.url, max_minutes, media_headers=media_headers)
+    from generic_media import resolve_generic
+    return resolve_generic(ref, max_minutes, media_headers=media_headers)
 
 
 def check_audio_range(direct, referer, request_headers=None):
     """Check at most 1 KiB; close before reading if the server ignores Range."""
+    direct = direct_url(direct)
     try:
         headers = {"referer": referer}
         headers.update({k.lower(): v for k, v in (request_headers or {}).items()
@@ -149,7 +88,8 @@ def check_audio_range(direct, referer, request_headers=None):
                 if length is not None and (not length.isdecimal() or int(length) != expected):
                     raise Problem("音频 Range 响应长度无效；未读取响应体，不重试。")
                 content_type = response.headers.get("Content-Type", "").split(";")[0].lower()
-                if content_type not in {"audio/mp4", "video/mp4", "application/octet-stream"}:
+                if content_type not in {"audio/mp4", "video/mp4", "application/octet-stream",
+                                        "audio/webm", "video/webm", "audio/mpeg", "audio/ogg"}:
                     raise Problem("音频 Range 响应不是预期媒体类型；未读取响应体，不重试。")
                 data = next(response.iter_raw(chunk_size=1024), b"")
                 if len(data) != expected:
@@ -157,6 +97,15 @@ def check_audio_range(direct, referer, request_headers=None):
                 return {"http_status": 206, "bytes_read": len(data), "content_type": content_type}
     except httpx.HTTPError:
         raise Problem("音频 Range 网络或 TLS 检查失败；未输出直链，不重试。") from None
+
+
+def direct_url(media):
+    if isinstance(media, str):
+        return media
+    info = media['info']
+    if info.get('protocol', 'https') != 'https' or info.get('fragments'):
+        raise Problem('分段音轨不能直接作为单文件地址；请用默认上传模式或 audio-check。')
+    return info['url']
 
 
 def base_url(workspace):
@@ -343,6 +292,39 @@ def stage_for_bailian(source, direct, media_headers, model, workspace, auth, sta
     return uri
 
 
+def audio_check(args):
+    """No credentials, upload policy, or ASR: local audio acquisition and validation only."""
+    from temporary_audio import AudioUploadError, prepared_audio
+    ref = parse_video(args.url)
+    folder = (args.output or ROOT / 'runs' / (ref.identity + '-audio-check')).resolve()
+    with locked(folder):
+        path = folder / 'audio-check.json'
+        if path.exists() or (folder / 'state.json').exists():
+            raise Problem('目录已有检查证据；不覆盖、不自动重试。')
+        state = {'status': 'RESOLVING', 'source': {'platform': ref.platform, 'video_id': ref.video_id,
+                 'video_url': ref.url}, 'upload_submitted': False, 'transcription_submitted': False}
+        write_json(path, state)
+        def event(status, details):
+            if status == 'LOCAL_AUDIO_REMOVED':
+                state['local_audio_removed'] = True
+            else:
+                state['status'] = status
+                state.update(details)
+            write_json(path, state)
+        try:
+            headers = {}
+            source, media = resolve(ref.url, args.max_minutes, media_headers=headers)
+            state['source'] = source
+            with prepared_audio(media, headers, source['duration_seconds'], max_bytes=args.max_audio_mib * 1024 * 1024,
+                                event=event):
+                pass
+        except (Problem, AudioUploadError) as exc:
+            state.update(status='FAILED', error=str(exc))
+            write_json(path, state)
+            raise Problem(str(exc)) from None
+        print(json.dumps({**state, 'directory': str(folder)}, ensure_ascii=False))
+
+
 def upload_check(args):
     """Deliberately separate from prepare: this command cannot submit ASR."""
     url, identity = canonical(args.url)
@@ -472,6 +454,8 @@ def prepare(args):
         base_url(workspace)
         media_headers = {}
         source, direct = resolve(url, args.max_minutes, media_headers=media_headers)
+        if args.input_mode == 'direct-url':
+            direct = direct_url(direct)
         state = {"source": source, "report_mode": args.mode, "workspace": workspace, "model": model,
                  "input_mode": args.input_mode}
         if args.input_mode == "bailian-upload":
@@ -611,6 +595,11 @@ def main():
     p.add_argument("--max-audio-mib", type=int, default=DEFAULT_AUDIO_MIB)
     p.add_argument('--reuse-from', type=Path, help='优先复用已导入的成功任务目录')
     p.add_argument('--new-attempt', action='store_true', help='仅在明确授权重试后使用；未知提交仍禁止重提')
+    p = commands.add_parser('audio-check', help='仅解析、下载独立音频并完整解码验证，不上传、不提交 ASR')
+    p.add_argument('url')
+    p.add_argument('--output', type=Path)
+    p.add_argument('--max-minutes', type=int, default=DEFAULT_MAX_MINUTES)
+    p.add_argument('--max-audio-mib', type=int, default=DEFAULT_AUDIO_MIB)
     p = commands.add_parser("upload-check", help="仅下载验证独立音频并上传官方临时存储，不提交转写")
     p.add_argument("url")
     p.add_argument("--output", type=Path)
@@ -638,6 +627,8 @@ def main():
         raise Problem('新的收费尝试必须显式指定独立 --output，保留旧任务证据。')
     if args.command == "prepare":
         prepare(args)
+    elif args.command == 'audio-check':
+        audio_check(args)
     elif args.command == "upload-check":
         upload_check(args)
     elif args.command == "probe":

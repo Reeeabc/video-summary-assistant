@@ -24,6 +24,7 @@ export REQUESTS_CA_BUNDLE="${REQUESTS_CA_BUNDLE:-$video_ca_bundle}"
 # Keep inherited proxy and explicit CA settings; never disable TLS verification.
 python3 -m venv .venv
 .venv/bin/python -m pip install --quiet -r requirements.txt
+# requirements pin Deno and yt-dlp-ejs for YouTube challenges, plus HLS AES support.
 .venv/bin/python runtime_config.py
 .venv/bin/python -m pip check
 .venv/bin/python -m unittest discover -s tests -v

@@ -4,6 +4,7 @@ This module never submits transcription. URLs and upload credentials stay in mem
 """
 from __future__ import annotations
 
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 import base64
 import hashlib
@@ -154,26 +155,37 @@ def upload_audio(client, policy, path, md5):
         'expires_at': (datetime.now(timezone.utc) + timedelta(hours=48)).isoformat()}
 
 
-def stage_audio(direct, headers, expected_duration, model, api_base, auth,
-                *, max_bytes=1024 * 1024 * 1024, event=lambda status, details: None):
-    """Upload validation only; return a private URI, delete local audio on all exits."""
+@contextmanager
+def prepared_audio(direct, headers, expected_duration, *, max_bytes=1024 * 1024 * 1024,
+                   event=lambda status, details: None):
+    """Prepare and validate local audio only. No policy upload or ASR calls."""
     configure_ca()
     try:
         with tempfile.TemporaryDirectory(prefix='bailian-audio-') as directory:
             path = Path(directory) / (uuid.uuid4().hex + '.m4a')
             event('DOWNLOADING', {})
-            with httpx.Client(timeout=httpx.Timeout(60, connect=15), follow_redirects=False) as media:
-                summary = download_audio(media, direct, headers, path, max_bytes)
-            summary.update(validate_audio(path, expected_duration))
+            if isinstance(direct, dict):
+                from audio_acquisition import acquire_audio
+                summary = acquire_audio(direct, path, expected_duration, max_bytes)
+            else:
+                with httpx.Client(timeout=httpx.Timeout(60, connect=15), follow_redirects=False) as media:
+                    summary = download_audio(media, direct, headers, path, max_bytes)
+                summary.update(validate_audio(path, expected_duration))
             event('AUDIO_VERIFIED', {'audio': summary})
-            with httpx.Client(timeout=30, follow_redirects=False) as api:
-                policy = get_policy(api, api_base, auth, model)
-            event('UPLOAD_PENDING', {})
-            # Fresh storage client: never send the model API Authorization header here.
-            with httpx.Client(timeout=httpx.Timeout(120, connect=15), follow_redirects=False) as storage:
-                uri, receipt = upload_audio(storage, policy, path, summary['md5'])
-            result = {'audio': summary, 'upload': receipt}
-            event('UPLOADED', result)
-        return uri, result
+            yield path, summary
     finally:
         event('LOCAL_AUDIO_REMOVED', {})
+
+
+def stage_audio(direct, headers, expected_duration, model, api_base, auth,
+                *, max_bytes=1024 * 1024 * 1024, event=lambda status, details: None):
+    """Official upload after complete local validation; no transcription here."""
+    with prepared_audio(direct, headers, expected_duration, max_bytes=max_bytes, event=event) as (path, summary):
+        with httpx.Client(timeout=30, follow_redirects=False) as api:
+            policy = get_policy(api, api_base, auth, model)
+        event('UPLOAD_PENDING', {})
+        with httpx.Client(timeout=httpx.Timeout(120, connect=15), follow_redirects=False) as storage:
+            uri, receipt = upload_audio(storage, policy, path, summary['md5'])
+        result = {'audio': summary, 'upload': receipt}
+        event('UPLOADED', result)
+    return uri, result

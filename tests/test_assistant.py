@@ -32,7 +32,7 @@ class AssistantTests(unittest.TestCase):
             with self.subTest(value=value), self.assertRaises(m.Problem):
                 m.canonical(value)
         url, identity = m.canonical("https://www.bilibili.com/video/BV1gmJX6SExT?p=2&share=test")
-        self.assertEqual(identity, "BV1gmJX6SExT-p2")
+        self.assertEqual(identity, "bilibili-BV1gmJX6SExT-p2")
         self.assertEqual(url, "https://www.bilibili.com/video/BV1gmJX6SExT?p=2")
 
     def test_redaction_removes_nested_media_urls_and_auth(self):
