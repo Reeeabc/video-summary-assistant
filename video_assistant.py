@@ -502,10 +502,12 @@ def prepare(args):
                 print(json.dumps({'status': 'TRANSCRIPT_READY', 'source_kind': 'platform_subtitles',
                                   'directory': str(folder), 'transcription_submitted': False}, ensure_ascii=False))
                 return
-            if result['status'] in {'blocked', 'restricted'}:
+            login_only = (result['status'] == 'restricted'
+                          and result.get('reason') == 'subtitle_login_required')
+            if result['status'] == 'blocked' or (result['status'] == 'restricted' and not login_only):
                 raise Problem('字幕受访问限制或请求被阻断，未自动进入收费转写：' + result['reason'])
             if strategy == 'subtitles-only':
-                raise Problem('无可用平台字幕；subtitles-only 禁止音频下载和收费转写。')
+                raise Problem('当前无法取得可用平台字幕；subtitles-only 禁止音频下载和收费转写。')
         headers = credentials()
         model = os.environ.get("ASR_MODEL", "qwen-audio-3.1-asr-flash-filetrans")
         if model not in MODELS:

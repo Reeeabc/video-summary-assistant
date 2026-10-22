@@ -2,13 +2,13 @@
 
 在已配置的 Codex Cloud 环境发送单条 B站、YouTube 或 Vimeo 链接并要求总结，默认执行：
 
-**单视频链接 → 复用已有成功来源 → 优先获取平台字幕 → 有字幕直接生成报告；确认字幕不可用时，才下载/校验独立音频 → 百炼临时上传 → ASR → 报告。**
+**单视频链接 → 复用已有成功来源 → 优先获取平台字幕 → 有字幕直接生成报告；确认字幕不可用或字幕明确需登录时，才下载/校验独立音频 → 百炼临时上传 → ASR → 报告。**
 
 默认 source-strategy=auto，ASR 输入方式为 `bailian-upload`；standard 模式、最长 **300 分钟**、音频最大 **1024 MiB**。不下载视频画面，不需要自有 OSS 或额外报告模型 API Key。`direct-url` 是手动选项，失败不自动切换模式或另建收费任务。实际验收及本轮非计费检查见 [VALIDATION.md](VALIDATION.md)。
 
 平台实际支持状态、样本和阻断见 [PLATFORMS.md](PLATFORMS.md)。B站已完成实际端到端；YouTube/Vimeo 已接入代码，但当前环境分别遇代理 CONNECT 403 和提取器登录要求，尚未通过线上音频与 ASR 验收。抖音、TikTok、西瓜仅预留入口，不开放处理。
 
-字幕研究、样本与使用边界见 [CAPTIONS.md](CAPTIONS.md)。YouTube 支持人工/平台自动字幕，B站按分 P 的 cid 查询字幕目录，弹幕不当字幕；匿名访问可能拿不到已有字幕。字幕明确需登录或请求被阻断时停止，不自动收费回退。质量诊断记录覆盖、空档、重叠和重复，低覆盖不等于字幕缺失。参考对照见 [REFERENCE_COMPARISON.md](REFERENCE_COMPARISON.md)。
+字幕研究、样本与使用边界见 [CAPTIONS.md](CAPTIONS.md)。YouTube 支持人工/平台自动字幕，B站按分 P 的 cid 查询字幕目录，弹幕不当字幕；匿名访问可能拿不到已有字幕。仅字幕明确需登录时保留 restricted 证据，auto 按既有费用授权进入公开音频 ASR；subtitles-only 仍停止。请求被阻断或其他访问限制不自动回退。质量诊断记录覆盖、空档、重叠和重复，低覆盖不等于字幕缺失。参考对照见 [REFERENCE_COMPARISON.md](REFERENCE_COMPARISON.md)。
 
 ## 初始化
 
@@ -33,7 +33,7 @@ bash setup.sh
 [AGENTS.md](AGENTS.md) 规定自动完成转写、阅读、报告和交付；需要速览可加“brief 模式”。脚本准备来源，Codex 按 `vendor/video-report/SKILL.md` 写报告。
 
 ```bash
-# 默认字幕优先，成功来源优先复用；字幕不可用才进入音频后端
+# 默认字幕优先，成功来源优先复用；字幕不可用或仅字幕需登录时进入音频后端
 .venv/bin/python video_assistant.py prepare 'BV1gmJX6SExT' --mode standard
 # 以下命令使用输出的 directory，不能假定任务路径
 .venv/bin/python video_assistant.py resume '任务目录'
@@ -65,6 +65,8 @@ audio-check 在 runs/<平台>-<视频ID>[-p分P]-audio-check/audio-check.json �
 
 手动直链模式为 `prepare 视频链接 --input-mode direct-url`。仅支持单文件直链，分段音轨明确拒绝并提示使用上传模式；它把音频直链交给百炼，不假定云端 User-Agent/Referer 会传给百炼。此前一次实际直链任务 `FILE_DOWNLOAD_FAILED`，临时上传模式随后完成实际转写与报告；云端取流成功不能证明百炼也能取流。
 
+直链模式省去本地媒体下载和临时上传，但要求百炼能在签名有效期内独立读取完整、受支持格式的音频。需 Referer/Cookie、出口受限或分段清单的地址不保证可用，平台网页 URL 不能替代音频文件 URL。直链任务失败后停止，不自动切到上传模式再发起一次收费任务；默认仍为已验收的 bailian-upload。
+
 ## 恢复、复用与安全
 
 `prepare` 在查询字幕、获取新直链、凭据和计费前寻找可访问的成功任务，检查来源完整性；不同阅读模式也复用原转写。始终使用返回目录，复用不会新建 ASR。`status 目录` 查看脱敏检查点。提交前持久化 `SUBMISSION_UNKNOWN`，拿到任务 ID 立即保存，后续仅查询原任务。
@@ -88,7 +90,7 @@ B站继续核对 Content-Length、SHA-256、AAC 音轨、时长及完整解码�
 
 `deliver --title` 接受根据正文提炼的简洁主题；未指定时优先使用报告 H1，再使用视频标题，拒绝 report 等通用标题。文件名清理路径字符并限制长度，brief 使用 `_速览`；TXT 命名为 `内容主题_精读_原始转写.txt`。迁移旧 report 工作稿后，后续 verify/deliver 从 state 中读取实际名称，ZIP 解压后仍可恢复任务。
 
-字幕任务的 TXT 文件后缀为“原始字幕”；ASR 任务为“原始转写”。source_kind=platform_subtitles 时，ZIP 使用真实 caption-raw.json 与 caption-check.json，不生成虚构的 ASR 任务文件。auto 回退 ASR 时保留字幕不可用证据。
+字幕任务的 TXT 文件后缀为“原始字幕”；ASR 任务为“原始转写”。source_kind=platform_subtitles 时，ZIP 使用真实 caption-raw.json 与 caption-check.json，不生成虚构的 ASR 任务文件。auto 回退 ASR 时保留字幕不可用或需登录的证据。
 
 ASR 任务 ZIP 还包含原始 `transcript.txt`、`transcript.md`、`input.json`、`source-units.json`、`state.json`、`asr-task.json`、脱敏 `asr-raw.json`、`report-check.json` 和可用的 `review.json`。**主题命名的 Markdown 是阅读报告，`transcript.md` 是原始转写**，不能互相代替。
 

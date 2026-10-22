@@ -169,12 +169,45 @@ class CaptionTests(unittest.TestCase):
 
     def test_blocked_and_subtitles_only_never_fall_back_to_paid_audio(self):
         for result, strategy in [({'status': 'blocked', 'reason': 'HTTP 403'}, 'auto'),
-                                 ({'status': 'restricted', 'reason': 'subtitle_login_required'}, 'auto'),
+                                 ({'status': 'blocked', 'reason': 'subtitle_login_required'}, 'auto'),
+                                 ({'status': 'restricted', 'reason': 'other_access_restriction'}, 'auto'),
+                                 ({'status': 'restricted', 'reason': 'subtitle_login_required'}, 'subtitles-only'),
                                  ({'status': 'unavailable', 'reason': 'none'}, 'subtitles-only')]:
             with tempfile.TemporaryDirectory() as td, patch.object(app, 'ROOT', Path(td)), \
                  patch.object(app, 'fetch_captions', return_value=result), \
                  patch.object(app, 'credentials', side_effect=AssertionError('no billing')):
                 with self.assertRaises(app.Problem): app.prepare(self.args(source_strategy=strategy))
+
+    def test_login_only_caption_restriction_uses_selected_audio_backend(self):
+        result = {'status': 'restricted', 'reason': 'subtitle_login_required'}
+        url = parse_video('BV1gmJX6SExT').url
+        for mode in ('bailian-upload', 'direct-url'):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as td, \
+                 patch.object(app, 'ROOT', Path(td)), patch.object(app, 'fetch_captions', return_value=result), \
+                 patch.object(app, 'credentials', return_value={}), \
+                 patch.object(app, 'resolve', return_value=({'video_url': url, 'duration_seconds': 10}, 'https://cdn.test/audio')), \
+                 patch.object(app, 'stage_for_bailian', return_value='oss://temporary/audio.m4a') as staged, \
+                 patch.object(app, 'submit') as submit, patch.object(app, 'poll'), redirect_stdout(io.StringIO()):
+                app.prepare(self.args(url=url, input_mode=mode))
+                staged.assert_called_once() if mode == 'bailian-upload' else staged.assert_not_called()
+                submit.assert_called_once()
+                self.assertEqual(submit.call_args.args[3],
+                                 'oss://temporary/audio.m4a' if mode == 'bailian-upload' else 'https://cdn.test/audio')
+                checks = list(Path(td).rglob('caption-check.json'))
+                self.assertEqual(len(checks), 1)
+                self.assertEqual(json.loads(checks[0].read_text())['status'], 'restricted')
+                self.assertEqual(json.loads(checks[0].read_text())['reason'], 'subtitle_login_required')
+
+    def test_login_caption_fallback_stops_when_public_audio_unavailable(self):
+        with tempfile.TemporaryDirectory() as td, patch.object(app, 'ROOT', Path(td)), \
+             patch.object(app, 'fetch_captions', return_value={'status': 'restricted', 'reason': 'subtitle_login_required'}), \
+             patch.object(app, 'credentials', return_value={}), \
+             patch.object(app, 'resolve', side_effect=app.Problem('audio_requires_login')), \
+             patch.object(app, 'stage_for_bailian') as staged, patch.object(app, 'submit') as submit:
+            with self.assertRaisesRegex(app.Problem, 'audio_requires_login'):
+                app.prepare(self.args(url='BV1gmJX6SExT'))
+            staged.assert_not_called()
+            submit.assert_not_called()
 
     def test_bili_human_and_ai_tracks_share_platform_catalog_but_keep_provenance(self):
         ref = parse_video('BV1gmJX6SExT')
