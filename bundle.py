@@ -11,7 +11,9 @@ FILES = [".gitignore", ".env.example", "AGENTS.md", "README.md", "DEPLOY.md", "V
          "runtime_config.py", "media_http.py", "tests/test_media_http.py", "report_delivery.py", "tests/test_workflow.py",
          "platforms.py", "bilibili_media.py", "generic_media.py", "media_download.py",
          "audio_acquisition.py", "tests/test_platforms.py", "PLATFORMS.md",
-         "captions.py", "caption_extractor.py", "tests/test_captions.py", "CAPTIONS.md", "REFERENCE_COMPARISON.md"]
+         "captions.py", "caption_extractor.py", "tests/test_captions.py", "CAPTIONS.md", "REFERENCE_COMPARISON.md",
+         "cloud/install.sh", "cloud/install_instructions.py", "cloud/start-skill.md", "cloud/workspace-AGENTS.md",
+         "tests/test_cloud_instructions.py", "tests/test_short_links.py"]
 
 
 def bundle(destination):

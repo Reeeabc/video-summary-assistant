@@ -4,7 +4,9 @@
 
 ## 环境配置
 
-在环境设置中选择本仓库与 `main`，Setup command 填 **`bash setup.sh`**。保留现有网络、变量和密钥安全绑定，不复制或打印密钥值。
+本环境专用于视频总结。在环境设置中选择本仓库，使用包含本次修复的 `main` 检出；安装脚本执行 **`cd /workspace/video-summary-assistant && bash cloud/install.sh`**，启动技能使用 [cloud/start-skill.md](cloud/start-skill.md) 的完整正文。保留现有网络、变量和密钥安全绑定，不复制或打印密钥值。本地安装仍执行 `bash setup.sh`，不会改本机上级目录的指令。
+
+`cloud/install.sh` 先运行原 `setup.sh`，再将 [cloud/workspace-AGENTS.md](cloud/workspace-AGENTS.md) 渲染到 `/workspace/AGENTS.md` 的受管理区块。它只更新自己的区块，保留原有规则；重复安装不重复追加，异常标记或符号链接会停止而不覆盖。入口指令负责让 `/workspace` 起始的任务读取仓库规则；启动技能再次明确“单条链接即执行 prepare→完整来源→报告→deliver”，并拒绝用网页概览代替。指令配置的有效性还需要发布后的新任务验收，程序离线测试不能证明模型已实际遵循。
 
 - Python 3.12+；固定依赖见 requirements.txt，新增 Deno 2.9.8、yt-dlp-ejs 0.8.0（YouTube 官方 JS 挑战支持）和 pycryptodomex 3.24.1（HLS AES）。setup 在 venv 安装并检查运行时，不依赖手工安装 Node，不启用远程 JS 组件。
 - 系统包 `ffmpeg`（提供 FFmpeg/FFprobe）和 `ca-certificates`。缺少时 setup 使用 apt 安装，需要 root 或免交互 sudo；其他镜像须管理员预装。
@@ -52,11 +54,14 @@ ASR 来源确认沿用原任务 ID，字幕来源确认无虚构 ASR 任务并�
 
 当前若只有只读环境工具，没有编辑/Publish 接口，以下步骤须用户完成，不能宣称已自动发布：
 
-1. 打开现有云环境 **Edit/设置**，确认仓库 `Reeeabc/video-summary-assistant`、分支 `main`、初始化命令 `bash setup.sh`，保留现有安全配置。
-2. **Save → Rebuild/更新环境 → Publish**（以当前界面为准），等待初始化成功及 `Environment published`。无单独重建按钮则按界面提供的更新/发布流程完成。
-3. 新建会话并选择该环境。需要复用旧结果时导入原完整 ZIP，不为环境更新重新转写成功视频。
+1. 合并修复后，从现有云环境设置进入 **Edit**，安全同步到包含修复的源码，报告实际 SHA，保留现有安全配置和任务文件，不 reset/clean/stash。
+2. 安装脚本设为 `cd /workspace/video-summary-assistant && bash cloud/install.sh`；启动技能粘贴 `cloud/start-skill.md` 全文。实际运行安装脚本与离线验证，检查 `/workspace/AGENTS.md` 已有视频入口，并核对保存后的配置正文。安装器不运行媒体、上传或 ASR。
+3. 保存可编辑草稿，审核并点击 **Publish/Republish**，等待发布成功。普通会话中的文件修改不等于已更新可复用配置；无法保存时报告平台返回值，不能把旧“已发布”标识当作本次保存成功。
+4. 新建普通任务，只发一条视频链接，核对它实际读取仓库规则并执行 `prepare`，继续到 `deliver` 和文件交付；失败时核对实际错误。不要用初始化或诊断请求启动收费验收；已有成功视频先导入原完整 ZIP 后复用，不因更新重新转写。当前离线回归为129项；后续版本可增加，以实际测试发现数为准。
 
-新会话最简提示词：`总结这个视频：〈B站 / YouTube / Vimeo 单视频链接〉`。YouTube/B站可先用 `仅用平台字幕总结，拿不到就停止，不进行 ASR：〈链接〉`；需要音频的新平台先用 audio-check 验证；阻断则停止，新增收费验收单独授权。默认直链提交百炼，任务明确 FAILED 后最多一次下载校验并官方临时上传，300 分钟/1024 MiB，交付 HTML、完整 Markdown、SRT 和 ZIP；实际上传策略更小时报告限制并停止。
+源码更新是否已被后台刷新，应检查实际新任务的 SHA；不能把这次需要发布入口配置，推广为每次纯源码变动都必须重新发布。
+
+新会话最简提示词就是 `〈B站 / YouTube / Vimeo 单视频链接〉`，B站也接受 b23.tv 分享短链接及 BV 号。YouTube/B站可先用 `仅用平台字幕总结，拿不到就停止，不进行 ASR：〈链接〉`；需要音频的新平台先用 audio-check 验证；阻断则停止，新增收费验收单独授权。默认直链提交百炼，任务明确 FAILED 后最多一次下载校验并官方临时上传，300 分钟/1024 MiB，交付 HTML、完整 Markdown、SRT 和 ZIP；实际上传策略更小时报告限制并停止。
 
 源码包使用白名单，密钥、上传凭证、签名地址、音频、runs、虚拟环境和诊断脚本不提交。报告须下载留存，新会话不保证继承运行资料。未知/失败任务恢复规则见 README，禁止清空状态或换目录自动新增收费任务。
 

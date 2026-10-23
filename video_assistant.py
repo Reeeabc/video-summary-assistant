@@ -21,7 +21,7 @@ import time
 from urllib.parse import urlsplit
 
 import httpx
-from platforms import Problem, parse_video
+from platforms import Problem, parse_video, resolve_video
 from report_delivery import DeliveryError, content_stem, evidence_files, markdown_source_ids, render_markdown, report_paths, write_archive
 from captions import DEFAULT_LANGUAGES, fetch_captions
 from runtime_config import configure_ca
@@ -54,7 +54,7 @@ def write_json(path, value):
 
 
 def canonical(value):
-    ref = parse_video(value)
+    ref = resolve_video(value)
     return ref.url, ref.identity
 
 
@@ -361,7 +361,7 @@ def caption_raw(raw):
 
 
 def caption_check(args):
-    ref = parse_video(args.url)
+    ref = resolve_video(args.url)
     folder = (args.output or ROOT / 'runs' / (ref.identity + '-caption-check')).resolve()
     with locked(folder):
         path = folder / 'caption-check.json'
@@ -381,7 +381,7 @@ def caption_check(args):
 def audio_check(args):
     """No credentials, upload policy, or ASR: local audio acquisition and validation only."""
     from temporary_audio import AudioUploadError, prepared_audio
-    ref = parse_video(args.url)
+    ref = resolve_video(args.url)
     folder = (args.output or ROOT / 'runs' / (ref.identity + '-audio-check')).resolve()
     with locked(folder):
         path = folder / 'audio-check.json'
