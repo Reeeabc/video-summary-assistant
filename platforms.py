@@ -2,7 +2,9 @@
 from dataclasses import dataclass
 import os
 import re
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import parse_qs, urljoin, urlsplit
+
+import httpx
 
 
 class Problem(Exception):
@@ -25,6 +27,52 @@ class VideoRef:
 ADAPTERS = {'bilibili': 'bilibili_media', 'youtube': 'generic_media', 'vimeo': 'generic_media',
             'douyin': None, 'tiktok': None, 'ixigua': None}
 RESERVED_HOSTS = {'douyin.com': 'douyin', 'tiktok.com': 'tiktok', 'ixigua.com': 'ixigua'}
+
+
+def _short_url(value):
+    """Accept only the public Bilibili short-link endpoint, without credentials."""
+    try:
+        p = urlsplit(value)
+        return (p.scheme == 'https' and p.netloc == 'b23.tv' and not p.fragment
+                and re.fullmatch(r'/[A-Za-z0-9]{1,64}/?', p.path) is not None
+                and not any(c.isspace() or ord(c) < 32 for c in value))
+    except ValueError:
+        return False
+
+
+def resolve_video(value):
+    """Resolve bounded b23 redirects before using the pure canonical URL parser.
+
+    Redirect targets are validated before requesting them; no page bodies, cookies,
+    private headers, or ASR credentials are needed to discover the video identity.
+    """
+    if not _short_url(value):
+        return parse_video(value)
+    try:
+        with httpx.Client(timeout=15, follow_redirects=False) as client:
+            seen = set()
+            for _ in range(3):
+                if value in seen:
+                    raise Problem('B站短链接重定向循环；未进入字幕、音频或转写流程。')
+                seen.add(value)
+                client.cookies.clear()
+                with client.stream('GET', value, headers={'accept-encoding': 'identity'}) as response:
+                    if response.status_code not in {301, 302, 303, 307, 308}:
+                        raise Problem(f'B站短链接未返回有效重定向（HTTP {response.status_code}）；未提交转写。')
+                    location = response.headers.get('location', '')
+                    if not location or len(location) > 8192 or any(c.isspace() or ord(c) < 32 for c in location):
+                        raise Problem('B站短链接重定向地址无效；未提交转写。')
+                    target = urljoin(value, location)
+                if _short_url(target):
+                    value = target
+                    continue
+                ref = parse_video(target)
+                if ref.platform != 'bilibili':
+                    raise Problem('B站短链接未指向 B站单视频；未提交转写。')
+                return ref
+    except (httpx.HTTPError, ValueError):
+        raise Problem('B站短链接解析失败（网络、TLS 或地址错误）；未提交转写。') from None
+    raise Problem('B站短链接重定向超过三次；未提交转写。')
 
 
 def parse_video(value):

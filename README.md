@@ -1,8 +1,12 @@
 # 多平台云端视频总结助手
 
-在已配置的 Codex Cloud 环境发送单条 B站、YouTube 或 Vimeo 链接并要求总结，默认执行：
+本环境专用于视频总结。在已配置的 Codex Cloud 环境发送单条 B站、YouTube 或 Vimeo 链接（含 B站 `b23.tv` 分享短链接或 BV 号），即默认执行完整流程，无需再写“总结”或指定命令：
 
 **单视频链接 → 复用已有成功来源 → 优先获取平台字幕 → 有字幕直接生成报告；字幕不可用或明确需登录时，提取独立音频直链 → 百炼 ASR → 报告；直链任务明确失败后，最多一次下载/校验音频 → 百炼临时上传 → ASR。**
+
+用户明确要求只检查、只解释、只用字幕或不收费时遵守当次限制。不能用网页简介、搜索摘要或章节目录代替完整来源；未拿到来源时报告实际阻断，不能宣称已完成视频总结。
+
+云环境安装脚本和启动技能见 [cloud/install.sh](cloud/install.sh)、[cloud/start-skill.md](cloud/start-skill.md)。云任务可能从 `/workspace` 开始，安装脚本会在该目录的 `AGENTS.md` 中保存项目入口，保留其他已有规则；仅把指令放在仓库子目录并不足以验证新会话实际读到了它。配置保存、发布和新任务验收见 [DEPLOY.md](DEPLOY.md)。
 
 默认 source-strategy=auto，ASR 输入方式为 `direct-url`；standard 模式、最长 **300 分钟**、音频最大 **1024 MiB**。不下载视频画面，不需要自有 OSS 或额外报告模型 API Key。新直链任务明确 FAILED 后最多回退一次 `bailian-upload`；提交未知不重提，上传回退失败后停止。实际验收、授权直链尝试与免费检查见 [VALIDATION.md](VALIDATION.md)。
 
