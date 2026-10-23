@@ -8,7 +8,7 @@ FILES = [".gitignore", ".env.example", "AGENTS.md", "README.md", "DEPLOY.md", "V
          "UPSTREAM.json", "requirements.txt", "setup.sh", "video_assistant.py", "bundle.py",
          "bilibili_extractor.py", "tests/test_assistant.py", "tests/test_bilibili_extractor.py",
          "PROBE_DIAGNOSTICS.md", "temporary_audio.py", "tests/test_temporary_audio.py",
-         "runtime_config.py", "report_delivery.py", "tests/test_workflow.py",
+         "runtime_config.py", "media_http.py", "tests/test_media_http.py", "report_delivery.py", "tests/test_workflow.py",
          "platforms.py", "bilibili_media.py", "generic_media.py", "media_download.py",
          "audio_acquisition.py", "tests/test_platforms.py", "PLATFORMS.md",
          "captions.py", "caption_extractor.py", "tests/test_captions.py", "CAPTIONS.md", "REFERENCE_COMPARISON.md"]

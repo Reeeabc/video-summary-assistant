@@ -25,6 +25,7 @@ from platforms import Problem, parse_video
 from report_delivery import DeliveryError, content_stem, evidence_files, markdown_source_ids, render_markdown, report_paths, write_archive
 from captions import DEFAULT_LANGUAGES, fetch_captions
 from runtime_config import configure_ca
+from media_http import MediaAccessError, check_public_audio
 
 ROOT = Path(__file__).resolve().parent
 DEFAULT_MAX_MINUTES = 300
@@ -57,13 +58,25 @@ def canonical(value):
     return ref.url, ref.identity
 
 
-def resolve(url, max_minutes=DEFAULT_MAX_MINUTES, *, media_headers=None):
+def resolve(url, max_minutes=DEFAULT_MAX_MINUTES, *, media_headers=None, bilibili_audio_format=None):
     ref = parse_video(url)
     if ref.platform == 'bilibili':
         from bilibili_media import resolve_bilibili
-        return resolve_bilibili(ref.url, max_minutes, media_headers=media_headers)
+        return resolve_bilibili(ref.url, max_minutes, media_headers=media_headers, audio_format=bilibili_audio_format)
+    if bilibili_audio_format is not None:
+        raise Problem('--bilibili-audio-format 仅用于 B站链接；未请求媒体或提交百炼。')
     from generic_media import resolve_generic
     return resolve_generic(ref, max_minutes, media_headers=media_headers)
+
+
+def saved_bilibili_format(source, requested=None):
+    if requested is not None:
+        return requested
+    if parse_video(source['video_url']).platform == 'bilibili':
+        selected = source.get('audio_format_id')
+        if selected in {'30216', '30232'}:
+            return selected
+    return None
 
 
 def check_audio_range(direct, referer, request_headers=None):
@@ -103,7 +116,7 @@ def direct_url(media):
         return media
     info = media['info']
     if info.get('protocol', 'https') != 'https' or info.get('fragments'):
-        raise Problem('分段音轨不能直接作为单文件地址；请用默认上传模式或 audio-check。')
+        raise Problem('分段音轨不能直接作为单文件地址；请用上传模式或 audio-check。')
     return info['url']
 
 
@@ -249,6 +262,9 @@ def poll(client, folder, state, headers, wait_seconds):
                 state.update(status="ASR_FAILED", provider_task_status=cloud_status,
                              provider_code=provider_code(result or (results[0] if results else output)))
                 write_json(folder / "state.json", state)
+                if state['provider_code'] == 'FILE_DOWNLOAD_FAILED':
+                    raise Problem('百炼未能拉取音频文件（FILE_DOWNLOAD_FAILED）；提供商未返回上游 HTTP 原因。'
+                                  '仅符合持久化策略的直链 FAILED 任务可回退上传一次。')
                 raise Problem(f"百炼转写失败（{state['provider_code']}）；查看 asr-task.json，不自动重提。")
             url = result["transcription_url"]
             parsed = urlsplit(url)
@@ -294,7 +310,8 @@ def upload_fallback(client, folder, state, headers, wait_seconds):
     write_json(folder / 'state.json', state)
     # Download a fresh URL with extractor headers; never pass those headers to ASR.
     media_headers = {}
-    source, direct = resolve(state['source']['video_url'], state['max_minutes'], media_headers=media_headers)
+    source, direct = resolve(state['source']['video_url'], state['max_minutes'], media_headers=media_headers,
+                             bilibili_audio_format=saved_bilibili_format(state['source'], state.get('bilibili_audio_format')))
     state['source'] = source
     write_json(folder / 'state.json', state)
     uri = stage_for_bailian(source, direct, media_headers, state['model'], state['workspace'], headers,
@@ -382,7 +399,8 @@ def audio_check(args):
             write_json(path, state)
         try:
             headers = {}
-            source, media = resolve(ref.url, args.max_minutes, media_headers=headers)
+            source, media = resolve(ref.url, args.max_minutes, media_headers=headers,
+                                    bilibili_audio_format=getattr(args, 'bilibili_audio_format', None))
             state['source'] = source
             with prepared_audio(media, headers, source['duration_seconds'], max_bytes=args.max_audio_mib * 1024 * 1024,
                                 event=event):
@@ -409,7 +427,8 @@ def upload_check(args):
         workspace = os.environ.get("BAILIAN_WORKSPACE_ID", "").strip()
         base_url(workspace)
         media_headers = {}
-        source, direct = resolve(url, args.max_minutes, media_headers=media_headers)
+        source, direct = resolve(url, args.max_minutes, media_headers=media_headers,
+                                 bilibili_audio_format=getattr(args, 'bilibili_audio_format', None))
         state = {"source": source, "model": model, "workspace": workspace,
                  "input_mode": "bailian-upload", "transcription_submitted": False}
         write_json(path, state)
@@ -524,7 +543,7 @@ def prepare(args):
                 raise Problem(f'已有提交结果未知的任务：{task_folder}；先核实并绑定原任务，不得自动重提。')
             if old.get('task_id') and old.get('status') not in {'ASR_FAILED', 'SUBMIT_REJECTED'}:
                 raise Problem(f'已有任务待查询：{task_folder}；请用 resume，不另建任务。')
-            if (old.get('status') in {'ASR_FAILED', 'SUBMIT_REJECTED', 'AUDIO_STAGING'}
+            if (old.get('status') in {'ASR_FAILED', 'SUBMIT_REJECTED', 'AUDIO_STAGING', 'DIRECT_URL_CHECKING', 'DIRECT_URL_BLOCKED'}
                     and not getattr(args, 'new_attempt', False) and strategy != 'subtitles-only'):
                 raise Problem('已有失败或中断任务；须明确授权后用独立 --output 和 --new-attempt，不自动另建收费任务。')
         if strategy != 'audio-only':
@@ -554,7 +573,8 @@ def prepare(args):
         workspace = os.environ.get("BAILIAN_WORKSPACE_ID", "").strip()
         base_url(workspace)
         media_headers = {}
-        source, direct = resolve(url, args.max_minutes, media_headers=media_headers)
+        source, direct = resolve(url, args.max_minutes, media_headers=media_headers,
+                                 bilibili_audio_format=getattr(args, 'bilibili_audio_format', None))
         actual_mode = args.input_mode
         if actual_mode == 'direct-url':
             try:
@@ -564,11 +584,16 @@ def prepare(args):
                 actual_mode = 'bailian-upload'
         state = {"source": source, "report_mode": args.mode, "workspace": workspace, "model": model,
                  "input_mode": actual_mode, "requested_input_mode": args.input_mode,
-                 "upload_fallback_allowed": args.input_mode == 'direct-url',
+                 "upload_fallback_allowed": args.input_mode == 'direct-url' and not getattr(args, 'no_upload_fallback', False),
                  "max_minutes": args.max_minutes, "max_audio_mib": args.max_audio_mib,
                  "source_kind": "asr", "source_strategy": strategy}
+        selected_format = saved_bilibili_format(source, getattr(args, 'bilibili_audio_format', None))
+        if selected_format is not None:
+            state['bilibili_audio_format'] = selected_format
         if actual_mode != args.input_mode:
             state['direct_url_skipped'] = 'segmented_audio'
+        # A worker's full GET can fail while provider or ranged media access works.
+        # Keep that probe explicit; preserve direct ASR -> one confirmed-FAILED upload fallback.
         if actual_mode == "bailian-upload":
             state["status"] = "AUDIO_STAGING"
             write_json(path, state)
@@ -593,6 +618,8 @@ def resume_locked(folder, state, wait_seconds):
             raise Problem('平台字幕原始资料缺失；请恢复资料，不自动转为收费 ASR。')
         export_sources(folder, state, json.loads(raw_path.read_text()))
         return
+    if state.get('status') in {'DIRECT_URL_CHECKING', 'DIRECT_URL_BLOCKED'}:
+        raise Problem('直链预检被拒绝或中断；未提交转写，不自动重新请求或进入上传。')
     if (folder / "asr-raw.json").exists():
         export_sources(folder, state, json.loads((folder / "asr-raw.json").read_text()))
         return
@@ -716,6 +743,8 @@ def main():
     p.add_argument("--max-minutes", type=int, default=DEFAULT_MAX_MINUTES)
     p.add_argument("--wait-seconds", type=int, default=900)
     p.add_argument("--input-mode", choices=["direct-url", "bailian-upload"], default="direct-url")
+    p.add_argument('--no-upload-fallback', action='store_true', help='本次只允许直链 ASR，失败后停止，不创建上传回退任务')
+    p.add_argument('--bilibili-audio-format', choices=['30216', '30232'], help='显式选择 B站独立 AAC 音轨；指定轨道缺失时停止，默认优先 30216')
     p.add_argument("--max-audio-mib", type=int, default=DEFAULT_AUDIO_MIB)
     p.add_argument('--reuse-from', type=Path, help='优先复用已导入的成功任务目录')
     p.add_argument('--new-attempt', action='store_true', help='仅在明确授权重试后使用；未知提交仍禁止重提')
@@ -728,19 +757,25 @@ def main():
     p.add_argument('--max-minutes', type=int, default=DEFAULT_MAX_MINUTES)
     p.add_argument('--subtitle-langs', default=','.join(DEFAULT_LANGUAGES))
     p = commands.add_parser('audio-check', help='仅解析、下载独立音频并完整解码验证，不上传、不提交 ASR')
+    p.add_argument('--bilibili-audio-format', choices=['30216', '30232'])
     p.add_argument('url')
     p.add_argument('--output', type=Path)
     p.add_argument('--max-minutes', type=int, default=DEFAULT_MAX_MINUTES)
     p.add_argument('--max-audio-mib', type=int, default=DEFAULT_AUDIO_MIB)
     p = commands.add_parser("upload-check", help="仅下载验证独立音频并上传官方临时存储，不提交转写")
+    p.add_argument('--bilibili-audio-format', choices=['30216', '30232'])
     p.add_argument("url")
     p.add_argument("--output", type=Path)
     p.add_argument("--max-minutes", type=int, default=DEFAULT_MAX_MINUTES)
     p.add_argument("--max-audio-mib", type=int, default=DEFAULT_AUDIO_MIB)
-    p = commands.add_parser("probe", help="仅解析元数据和音轨，不提交百炼或下载媒体")
+    p = commands.add_parser("probe", help="解析元数据；可选免费媒体访问检查，不提交百炼")
+    p.add_argument('--bilibili-audio-format', choices=['30216', '30232'])
     p.add_argument("url")
     p.add_argument("--max-minutes", type=int, default=DEFAULT_MAX_MINUTES)
-    p.add_argument("--check-audio-range", action="store_true", help="用 Range 最多读取 1 KiB 验证音轨")
+    checks = p.add_mutually_exclusive_group()
+    checks.add_argument("--check-audio-range", action="store_true", help="用 Range 最多读取 1 KiB 验证音轨")
+    checks.add_argument('--check-public-audio', action='store_true', help='无站点请求头的完整 GET 预检；不读取音频正文，错误文本最多 8 KiB')
+    p.add_argument('--max-audio-mib', type=int, default=DEFAULT_AUDIO_MIB)
     for name in ("resume", "status", "verify", "deliver", "attach-task"):
         p = commands.add_parser(name)
         p.add_argument("folder", type=Path)
@@ -767,7 +802,14 @@ def main():
         upload_check(args)
     elif args.command == "probe":
         media_headers = {}
-        metadata, direct = resolve(canonical(args.url)[0], args.max_minutes, media_headers=media_headers)
+        metadata, direct = resolve(canonical(args.url)[0], args.max_minutes, media_headers=media_headers,
+                                   bilibili_audio_format=args.bilibili_audio_format)
+        if args.check_public_audio:
+            try:
+                metadata['direct_url_check'] = check_public_audio(direct_url(direct), args.max_audio_mib * 1024 * 1024)
+            except MediaAccessError as exc:
+                print(json.dumps({**metadata, 'direct_url_check': exc.details}, ensure_ascii=False), flush=True)
+                raise Problem('音频直链免费预检未通过；未提交转写。' + str(exc)) from None
         if args.check_audio_range:
             try:
                 metadata["audio_range_check"] = check_audio_range(direct, metadata["video_url"], media_headers)

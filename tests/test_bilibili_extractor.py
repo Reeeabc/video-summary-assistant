@@ -83,6 +83,13 @@ class DetailFallbackTests(unittest.TestCase):
         self.assertEqual(info['duration'], 60)
         self.assertEqual(self.calls[-1][1]['cid'], 111)
 
+    def test_same_audio_format_preserves_the_playback_api_backup_urls(self):
+        backup = 'https://upos-hz-mirrorakam.akamaized.net/audio?sign=private-backup'
+        self.playback['data']['dash']['audio'][0]['backupUrl'] = [backup]
+        info = self.extract()
+        self.assertEqual(info['formats'][0]['backup_urls'], [backup])
+        self.assertEqual(info['formats'][0]['format_id'], '30232')
+
     def test_invalid_detail_never_reaches_playback(self):
         mutations = [
             lambda d: d.update(code=-352),

@@ -134,6 +134,20 @@ class ProjectBiliBiliIE(BiliBiliIE):
         # Do not let upstream's fatal=False continue with an empty/failed response.
         return super()._download_playinfo(bvid, cid, headers=headers, query=query, fatal=True)
 
+    def extract_formats(self, play_info):
+        formats = super().extract_formats(play_info)
+        dash = play_info.get('dash') or {}
+        audios = list(dash.get('audio') or []) + list((dash.get('dolby') or {}).get('audio') or [])
+        if isinstance((dash.get('flac') or {}).get('audio'), dict):
+            audios.append(dash['flac']['audio'])
+        backups = {a.get('baseUrl') or a.get('base_url'): a.get('backupUrl') or a.get('backup_url') or []
+                   for a in audios if isinstance(a, dict)}
+        for fmt in formats:
+            if fmt.get('vcodec') == 'none':
+                candidates = backups.get(fmt.get('url'), [])
+                fmt['backup_urls'] = [u for u in candidates if isinstance(u, str)] if isinstance(candidates, list) else []
+        return formats
+
     def _get_chapters(self, aid, cid):
         if self._detail_pages is not None:
             return None  # Avoid unrelated chapter requests during the narrow fallback.
@@ -158,7 +172,7 @@ def main():
         info = ProjectBiliBiliIE(ydl).extract(parsed.urls[0])
         headers = media_headers(dict(ydl.params['http_headers']), info.get('http_headers'))
     output = {key: info.get(key) for key in ('_type', 'title', 'uploader', 'duration')}
-    output['formats'] = [{**{key: f.get(key) for key in ('url', 'format_id', 'acodec', 'vcodec')},
+    output['formats'] = [{**{key: f.get(key) for key in ('url', 'backup_urls', 'format_id', 'acodec', 'vcodec')},
                           'http_headers': media_headers(headers, f.get('http_headers'))}
                          for f in info.get('formats', [])]
     print(json.dumps(output, ensure_ascii=False))

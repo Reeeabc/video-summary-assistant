@@ -11,6 +11,7 @@ from unittest.mock import patch
 
 import httpx
 import yt_dlp
+from bilibili_media import audio_address
 from report_delivery import render_markdown
 
 spec = importlib.util.spec_from_file_location("assistant", Path(__file__).parents[1] / "video_assistant.py")
@@ -19,6 +20,57 @@ spec.loader.exec_module(m)
 
 
 class AssistantTests(unittest.TestCase):
+    def test_explicit_bilibili_audio_format_is_exact_and_missing_format_stops(self):
+        formats = [{'format_id': key, 'vcodec': 'none', 'acodec': 'mp4a.40.2',
+                    'url': 'https://cdn.test/audio-' + key} for key in ('30216', '30232')]
+        result = subprocess.CompletedProcess([], 0, json.dumps({'duration': 10, 'formats': formats}), '')
+        with patch.object(m.subprocess, 'run', return_value=result):
+            self.assertEqual(m.resolve('BV1LwHv6LEYz')[0]['audio_format_id'], '30216')
+            source, url = m.resolve('BV1LwHv6LEYz', bilibili_audio_format='30232')
+            self.assertEqual(source['audio_format_id'], '30232')
+            self.assertEqual(url, 'https://cdn.test/audio-30232')
+        result.stdout = json.dumps({'duration': 10, 'formats': formats[1:]})
+        with patch.object(m.subprocess, 'run', return_value=result):
+            self.assertEqual(m.resolve('BV1LwHv6LEYz')[0]['audio_format_id'], '30232')
+        with patch.object(m.subprocess, 'run', return_value=result), self.assertRaises(m.Problem):
+            m.resolve('BV1LwHv6LEYz', bilibili_audio_format='30216')
+
+    def test_preference_is_independent_of_extractor_order(self):
+        formats = [{'format_id': key, 'vcodec': 'none', 'acodec': 'mp4a.40.2',
+                    'url': 'https://cdn.test/audio-' + key} for key in ('30232', '30216')]
+        result = subprocess.CompletedProcess([], 0, json.dumps({'duration': 10, 'formats': formats}), '')
+        with patch.object(m.subprocess, 'run', return_value=result):
+            self.assertEqual(m.resolve('BV1LwHv6LEYz')[0]['audio_format_id'], '30216')
+
+    def test_bilibili_format_option_rejects_other_platforms_or_invalid_values_before_network(self):
+        with patch.object(m.subprocess, 'run', side_effect=AssertionError('no network')):
+            for url, selection in [('BV1LwHv6LEYz', 'invalid'), ('https://youtu.be/BaW_jenozKc', '30216')]:
+                with self.subTest(url=url), self.assertRaises(m.Problem):
+                    m.resolve(url, bilibili_audio_format=selection)
+
+    def test_only_api_provided_https_backup_for_the_same_resource_is_selected(self):
+        primary = 'https://upos-sz-mirrorcosov.bilivideo.com/upgcxcode/part.m4s?upsig=primary'
+        backup = 'https://upos-hz-mirrorakam.akamaized.net/upgcxcode/part.m4s?hdnts=backup-signature'
+        self.assertEqual(audio_address({'url':primary, 'backup_urls':[backup]}), (backup, 'provided_backup'))
+        for unsafe in ('https://evil.test/upgcxcode/part.m4s', 'https://x.akamaized.net/different.m4s',
+                       'https://user:secret@x.akamaized.net/upgcxcode/part.m4s',
+                       'http://x.akamaized.net/upgcxcode/part.m4s', 'https://x.akamaized.net:444/upgcxcode/part.m4s',
+                       'https://x.akamaized.net:bad/upgcxcode/part.m4s', 'https://x.akamaized.net/upgcxcode/part.m4s#x'):
+            with self.subTest(unsafe=unsafe):
+                self.assertEqual(audio_address({'url':primary,'backup_urls':[unsafe]}), (primary,'primary'))
+
+    def test_selected_cdn_metadata_excludes_both_signed_urls(self):
+        primary = 'https://upos-sz-mirrorcosov.bilivideo.com/audio?upsig=primary-private'
+        backup = 'https://upos-hz-mirrorakam.akamaized.net/audio?hdnts=backup-private'
+        info = {'duration':10,'formats':[{'format_id':'30232','vcodec':'none','acodec':'mp4a.40.2',
+            'url':primary,'backup_urls':[backup]}]}
+        with patch.object(m.subprocess,'run',return_value=subprocess.CompletedProcess([],0,json.dumps(info),'')):
+            source, actual = m.resolve('BV1LwHv6LEYz')
+        self.assertEqual(actual,backup)
+        self.assertEqual(source['audio_url_selection'],'provided_backup')
+        for sensitive in ('primary-private','backup-private','hdnts=', 'upsig='):
+            self.assertNotIn(sensitive,json.dumps(source))
+
     def state(self):
         return {"model": "qwen-audio-3.1-asr-flash-filetrans", "workspace": "ws-test",
                 "report_mode": "standard", "source": {
@@ -160,6 +212,19 @@ class AssistantTests(unittest.TestCase):
                     "output": {"task_id": "original-123"}}))) as client:
                 m.submit(client, folder, state, "https://cdn.test/audio", {"Authorization": "Bearer secret"})
             self.assertEqual(json.loads((folder / "state.json").read_text())["task_id"], "original-123")
+
+    def test_public_probe_reports_cdn_evidence_without_asr_or_credentials(self):
+        output = io.StringIO()
+        with patch.object(m.sys, 'argv', ['video_assistant.py', 'probe', 'BV1gmJX6SExT', '--check-public-audio']), \
+             patch.object(m, 'resolve', return_value=({'video_url':self.state()['source']['video_url']}, 'https://cdn.test/audio?sign=private')), \
+             patch.object(m, 'check_public_audio', side_effect=m.MediaAccessError({
+                 'http_status':567, 'classification':'edgeone_security_block'})), \
+             patch.object(m, 'credentials', side_effect=AssertionError('no credentials')), \
+             patch.object(m, 'submit', side_effect=AssertionError('no ASR')), redirect_stdout(output):
+            with self.assertRaises(m.Problem): m.main()
+        data = json.loads(output.getvalue())
+        self.assertEqual(data['direct_url_check']['classification'], 'edgeone_security_block')
+        self.assertNotIn('sign=', output.getvalue())
 
     def test_parent_success_with_failed_subtask_does_not_complete(self):
         payload = {"output": {"task_status": "SUCCEEDED", "results": [{

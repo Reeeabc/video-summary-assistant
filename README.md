@@ -4,7 +4,7 @@
 
 **单视频链接 → 复用已有成功来源 → 优先获取平台字幕 → 有字幕直接生成报告；字幕不可用或明确需登录时，提取独立音频直链 → 百炼 ASR → 报告；直链任务明确失败后，最多一次下载/校验音频 → 百炼临时上传 → ASR。**
 
-默认 source-strategy=auto，ASR 输入方式为 `direct-url`；standard 模式、最长 **300 分钟**、音频最大 **1024 MiB**。不下载视频画面，不需要自有 OSS 或额外报告模型 API Key。新直链任务明确 FAILED 后最多回退一次 `bailian-upload`；提交未知不重提，上传回退失败后停止。实际验收及本轮非计费检查见 [VALIDATION.md](VALIDATION.md)。
+默认 source-strategy=auto，ASR 输入方式为 `direct-url`；standard 模式、最长 **300 分钟**、音频最大 **1024 MiB**。不下载视频画面，不需要自有 OSS 或额外报告模型 API Key。新直链任务明确 FAILED 后最多回退一次 `bailian-upload`；提交未知不重提，上传回退失败后停止。实际验收、授权直链尝试与免费检查见 [VALIDATION.md](VALIDATION.md)。
 
 平台实际支持状态、样本和阻断见 [PLATFORMS.md](PLATFORMS.md)。B站已完成实际端到端；YouTube/Vimeo 已接入代码，但当前环境分别遇代理 CONNECT 403 和提取器登录要求，尚未通过线上音频与 ASR 验收。抖音、TikTok、西瓜仅预留入口，不开放处理。
 
@@ -57,6 +57,8 @@ bash setup.sh
 .venv/bin/python video_assistant.py audio-check 'https://www.youtube.com/watch?v=BaW_jenozKc'
 # 有效 206 时最多读取 1 KiB，不下载完整媒体
 .venv/bin/python video_assistant.py probe 'BV1gmJX6SExT' --check-audio-range
+# 按完整 GET 检查公开文件响应，不携带站点请求头，不读取音频正文、不提交 ASR
+.venv/bin/python video_assistant.py probe 'BV1LwHv6LEYz' --check-public-audio
 # 验证完整独立音频下载、解码与官方上传回执，随后清理本地音频
 .venv/bin/python video_assistant.py upload-check 'BV1gmJX6SExT'
 ```
@@ -65,7 +67,28 @@ audio-check 在 runs/<平台>-<视频ID>[-p分P]-audio-check/audio-check.json �
 
 默认直链模式为 `prepare 视频链接`（等同 --input-mode direct-url）。直链仅支持单文件；分段音轨预检后直接进入上传模式，不提交无效直链任务；它把音频直链交给百炼，不假定云端 User-Agent/Referer 会传给百炼。此前一次实际直链任务 `FILE_DOWNLOAD_FAILED`，临时上传模式随后完成实际转写与报告；云端取流成功不能证明百炼也能取流。
 
-直链模式省去本地媒体下载和临时上传，但要求百炼能在签名有效期内独立读取完整、受支持格式的音频。需 Referer/Cookie、出口受限或分段清单的地址不保证可用，平台网页 URL 不能替代音频文件 URL。新直链任务明确 FAILED 后自动回退一次下载上传 ASR；先归档原任务 ID/终态响应，再持久化回退检查点，重新解析新鲜音轨并下载校验。显式 --input-mode bailian-upload 可跳过直链。该新调度流程仅离线验收，历史直链失败与上传成功证据保持不变。
+直链模式省去本地媒体下载和临时上传，但要求百炼能在签名有效期内独立读取完整、受支持格式的音频。需 Referer/Cookie、出口受限或分段清单的地址不保证可用，平台网页 URL 不能替代音频文件 URL。新直链任务明确 FAILED 后自动回退一次下载上传 ASR；先归档原任务 ID/终态响应，再持久化回退检查点，重新解析新鲜音轨并下载校验。显式 --input-mode bailian-upload 可跳过直链；`--no-upload-fallback` 将本次限定为一个直链 ASR 任务，失败即停，不产生第二个上传回退任务。该新调度流程仅离线验收，历史直链失败与上传成功证据保持不变。
+
+`probe --check-public-audio` 是可选的免费公开 GET 诊断，不作为默认直链收费提交的门槛；无 Range GET 被拒不能推断正常 Range 读取或百炼取流也失败。该检查不读取音频正文，也不能证明百炼出口可用，和 Range 检查互斥，默认 1024 MiB 上限可用 `--max-audio-mib` 收紧。默认流程仍为 direct-url → 百炼任务明确 FAILED 后最多一次下载上传。历史 `DIRECT_URL_BLOCKED` / `DIRECT_URL_CHECKING` 状态保留、不自动重试。
+
+B站提取保留播放 API 的音轨备用地址。原主地址为 `upos-sz-mirrorcosov.bilivideo.com` 时，优先选择 API 为该音轨提供的 HTTPS Akamai 原始地址，要求相同资源路径、无凭据；不猜测主机、不编辑签名。主地址已为 Akamai 时原样保留，缺少有效备用地址时保留原地址。只记录 CDN 主机和选择来源，不记录签名 URL。
+
+B站现在默认优先 AAC `30216`：已有成功来源 → 平台字幕 → 30216 音频直链 ASR → 明确 FAILED 后最多一次同音轨下载、完整校验、官方临时上传及 ASR。直链路径省去云端本地音频下载和上传；上传仅作为符合持久化策略的回退，不对两个后端同时提交。缺少 30216 时，在本次解析的音轨中依次选 30232、其他独立 AAC。
+
+`prepare`、`probe`、`audio-check`、`upload-check` 也可显式传 `--bilibili-audio-format 30216` 或 `30232`；显式指定音轨不存在时停止，不自动替换。prepare 保存实际选中的 30216/30232，上传回退沿用；旧任务恢复沿用既有选择或原来源音轨，避免默认值更新导致换轨。该选项不用于其他平台，已有成功来源仍优先复用，不为改选轨重新计费。
+
+依据是三个实测样本：109.6 分钟 Git/GitHub 视频的 30216 已完整下载、解码并官方上传（HTTP 200、校验和一致，未执行新的上传 ASR）；48.1 分钟 AI 概念视频和 24.9 分钟 AI 编程流程视频的 30216 已分别完成云端直链转写与报告。此前 30232 的失败原因没有被单独控制变量证实，不能推断所有 30216 都成功或仅文件大小决定结果。详细证据见 VALIDATION.md；未知提交不重提，单次直链授权用 `--no-upload-fallback`。
+
+```bash
+# 免费检查指定音轨；不提交 ASR
+.venv/bin/python video_assistant.py audio-check 'BV1LwHv6LEYz' --bilibili-audio-format 30216 --output runs/cloud-30216-audio-check
+# 官方临时上传检查；不提交 ASR，已有目录不重试
+.venv/bin/python video_assistant.py upload-check 'BV1LwHv6LEYz' --bilibili-audio-format 30216 --output runs/cloud-30216-upload-check
+```
+
+单文件独立音轨使用连续 Range 下载：常规范围每段 1 MiB，初始探测与最后约 2 MiB 使用至多 32 KiB 小范围，同一下载过程不变更 URL。请求使用原媒体公开头、identity 编码、关闭持久连接并要求缓存重新验证。每段严格校验范围起止、总长度、Content-Length 和可用的 ETag，拒绝缺段、重复段、内容变更和中途退回整文件响应。首个请求若返回完整 HTTP 200 也可接受。仅传输超时/断连允许回滚并重试相同分块一次，整个文件最多三次网络重试；HTTP 拒绝、完整性错误、上传或 ASR 提交不适用。所有字节拼接完成后仍执行时长、SHA-256 与完整解码检查。
+
+下载及公开 GET 诊断错误最多检查 8 KiB 文本，只保留错误分类、固定文本标记、SHA-256、媒体类型和经过格式校验的 EdgeOne 请求 ID。567 加 EdgeOne 响应证据标记为安全拦截；单凭 567 或 `Server: envoy` 不归因。原始 HTML、Cookie、签名直链不落盘。该诊断不会解除 CDN 侧限制，不会换出口或伪造签名；音轨只选择 API 已返回的上述地址，下载途中不自动切换 CDN。
 
 ## 恢复、复用与安全
 

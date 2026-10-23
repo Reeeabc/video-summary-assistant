@@ -11,7 +11,29 @@ from platforms import Problem, parse_video
 ROOT = Path(__file__).resolve().parent
 
 
-def resolve_bilibili(url, max_minutes=300, *, media_headers=None):
+def audio_address(audio):
+    """Prefer the exact API-provided Akamai alternative to the range-dependent cosov URL."""
+    primary = urlsplit(audio['url'])
+    if primary.hostname == 'upos-sz-mirrorcosov.bilivideo.com':
+        backups = audio.get('backup_urls')
+        for address in backups if isinstance(backups, list) else []:
+            if not isinstance(address, str):
+                continue
+            try:
+                candidate = urlsplit(address)
+                if (candidate.scheme == 'https' and not candidate.username and not candidate.password
+                        and candidate.port in (None, 443) and not candidate.fragment
+                        and (candidate.hostname or '').endswith('.akamaized.net')
+                        and candidate.path == primary.path):
+                    return address, 'provided_backup'
+            except ValueError:
+                continue
+    return audio['url'], 'primary'
+
+
+def resolve_bilibili(url, max_minutes=300, *, media_headers=None, audio_format=None):
+    if audio_format not in (None, '30216', '30232'):
+        raise Problem('B站音轨选项无效；未请求媒体或提交百炼。')
     # The extractor subprocess does not receive the ASR credential environment.
     env = {k: v for k, v in os.environ.items() if k in {
         "PATH", "HOME", "TMPDIR", "LANG", "LC_ALL", "SSL_CERT_FILE", "SSL_CERT_DIR",
@@ -58,8 +80,15 @@ def resolve_bilibili(url, max_minutes=300, *, media_headers=None):
               and f.get("acodec") == "mp4a.40.2" and f.get("url")]
     if not audios:
         raise Problem("没有找到可用的独立 AAC 音频直链；未下载媒体或提交百炼。")
-    audio = next((f for f in audios if f.get("format_id") == "30232"), audios[0])
-    media = urlsplit(audio["url"])
+    if audio_format is not None:
+        audio = next((f for f in audios if f.get('format_id') == audio_format), None)
+        if audio is None:
+            raise Problem('指定的 B站独立 AAC 音轨不可用；不替换音轨、不提交百炼。')
+    else:
+        audio = next((f for preferred in ('30216', '30232') for f in audios
+                      if f.get('format_id') == preferred), audios[0])
+    address, selection = audio_address(audio)
+    media = urlsplit(address)
     if media.scheme != "https" or media.username or media.password:
         raise Problem("媒体直链不符合 HTTPS 要求；未提交百炼。")
     ref = parse_video(url)
@@ -68,6 +97,7 @@ def resolve_bilibili(url, max_minutes=300, *, media_headers=None):
                 "audio_protocol": audio.get("protocol", "https"), "video_url": url, "video_title": info.get("title", ""),
                 "uploader": info.get("uploader", ""), "duration_seconds": duration,
                 "audio_format_id": audio.get("format_id"), "audio_codec": audio.get("acodec"),
+                "audio_cdn_host": media.hostname, "audio_url_selection": selection,
                 "audio": {"format_id": audio.get('format_id'), "codec": audio.get('acodec'),
                           "protocol": audio.get('protocol', 'https'), "container": audio.get('ext', 'm4a'),
                           "segmented": False}}
@@ -76,4 +106,4 @@ def resolve_bilibili(url, max_minutes=300, *, media_headers=None):
         media_headers.update({k.lower(): v for k, v in audio["http_headers"].items()
             if k.lower() in {"user-agent", "referer", "origin", "accept", "accept-language", "sec-fetch-mode"}
             and isinstance(v, str)})
-    return metadata, audio["url"]
+    return metadata, address
