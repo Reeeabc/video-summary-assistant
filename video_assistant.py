@@ -69,6 +69,16 @@ def resolve(url, max_minutes=DEFAULT_MAX_MINUTES, *, media_headers=None, bilibil
     return resolve_generic(ref, max_minutes, media_headers=media_headers)
 
 
+def saved_bilibili_format(source, requested=None):
+    if requested is not None:
+        return requested
+    if parse_video(source['video_url']).platform == 'bilibili':
+        selected = source.get('audio_format_id')
+        if selected in {'30216', '30232'}:
+            return selected
+    return None
+
+
 def check_audio_range(direct, referer, request_headers=None):
     """Check at most 1 KiB; close before reading if the server ignores Range."""
     direct = direct_url(direct)
@@ -301,7 +311,7 @@ def upload_fallback(client, folder, state, headers, wait_seconds):
     # Download a fresh URL with extractor headers; never pass those headers to ASR.
     media_headers = {}
     source, direct = resolve(state['source']['video_url'], state['max_minutes'], media_headers=media_headers,
-                             bilibili_audio_format=state.get('bilibili_audio_format'))
+                             bilibili_audio_format=saved_bilibili_format(state['source'], state.get('bilibili_audio_format')))
     state['source'] = source
     write_json(folder / 'state.json', state)
     uri = stage_for_bailian(source, direct, media_headers, state['model'], state['workspace'], headers,
@@ -577,8 +587,9 @@ def prepare(args):
                  "upload_fallback_allowed": args.input_mode == 'direct-url' and not getattr(args, 'no_upload_fallback', False),
                  "max_minutes": args.max_minutes, "max_audio_mib": args.max_audio_mib,
                  "source_kind": "asr", "source_strategy": strategy}
-        if getattr(args, 'bilibili_audio_format', None) is not None:
-            state['bilibili_audio_format'] = args.bilibili_audio_format
+        selected_format = saved_bilibili_format(source, getattr(args, 'bilibili_audio_format', None))
+        if selected_format is not None:
+            state['bilibili_audio_format'] = selected_format
         if actual_mode != args.input_mode:
             state['direct_url_skipped'] = 'segmented_audio'
         # A worker's full GET can fail while provider or ranged media access works.
@@ -733,7 +744,7 @@ def main():
     p.add_argument("--wait-seconds", type=int, default=900)
     p.add_argument("--input-mode", choices=["direct-url", "bailian-upload"], default="direct-url")
     p.add_argument('--no-upload-fallback', action='store_true', help='本次只允许直链 ASR，失败后停止，不创建上传回退任务')
-    p.add_argument('--bilibili-audio-format', choices=['30216', '30232'], help='显式选择 B站独立 AAC 音轨；缺失时停止，默认仍优先 30232')
+    p.add_argument('--bilibili-audio-format', choices=['30216', '30232'], help='显式选择 B站独立 AAC 音轨；指定轨道缺失时停止，默认优先 30216')
     p.add_argument("--max-audio-mib", type=int, default=DEFAULT_AUDIO_MIB)
     p.add_argument('--reuse-from', type=Path, help='优先复用已导入的成功任务目录')
     p.add_argument('--new-attempt', action='store_true', help='仅在明确授权重试后使用；未知提交仍禁止重提')

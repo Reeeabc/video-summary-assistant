@@ -161,6 +161,24 @@ class WorkflowTests(unittest.TestCase):
                              ['30216', '30216'])
             staged.assert_called_once()
 
+    def test_default_selection_is_saved_and_reused_for_upload(self):
+        with self.fallback_scenario() as (folder, args, calls, resolve, staged):
+            source, media = resolve.return_value
+            source.update(platform='bilibili', audio_format_id='30216')
+            app.prepare(args)
+            state = json.loads((folder/'state.json').read_text())
+            self.assertEqual(state['bilibili_audio_format'], '30216')
+            self.assertIsNone(resolve.call_args_list[0].kwargs['bilibili_audio_format'])
+            self.assertEqual(resolve.call_args_list[1].kwargs['bilibili_audio_format'], '30216')
+            self.assertEqual(calls, ['direct-task', 'upload-task'])
+
+    def test_legacy_task_keeps_its_original_audio_format(self):
+        for selected in ('30232', '30216'):
+            source = {'video_url': URL, 'audio_format_id': selected}
+            self.assertEqual(app.saved_bilibili_format(source), selected)
+        self.assertIsNone(app.saved_bilibili_format({'video_url': URL}))
+        self.assertIsNone(app.saved_bilibili_format({'video_url': 'https://youtu.be/BaW_jenozKc', 'audio_format_id': '30232'}))
+
     def test_explicit_direct_only_attempt_never_creates_a_second_paid_task(self):
         with self.fallback_scenario() as (folder,args,calls,resolve,staged):
             args.no_upload_fallback=True

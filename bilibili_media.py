@@ -85,7 +85,8 @@ def resolve_bilibili(url, max_minutes=300, *, media_headers=None, audio_format=N
         if audio is None:
             raise Problem('指定的 B站独立 AAC 音轨不可用；不替换音轨、不提交百炼。')
     else:
-        audio = next((f for f in audios if f.get("format_id") == "30232"), audios[0])
+        audio = next((f for preferred in ('30216', '30232') for f in audios
+                      if f.get('format_id') == preferred), audios[0])
     address, selection = audio_address(audio)
     media = urlsplit(address)
     if media.scheme != "https" or media.username or media.password:

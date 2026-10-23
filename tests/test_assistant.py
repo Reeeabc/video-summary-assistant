@@ -25,13 +25,22 @@ class AssistantTests(unittest.TestCase):
                     'url': 'https://cdn.test/audio-' + key} for key in ('30216', '30232')]
         result = subprocess.CompletedProcess([], 0, json.dumps({'duration': 10, 'formats': formats}), '')
         with patch.object(m.subprocess, 'run', return_value=result):
-            self.assertEqual(m.resolve('BV1LwHv6LEYz')[0]['audio_format_id'], '30232')
-            source, url = m.resolve('BV1LwHv6LEYz', bilibili_audio_format='30216')
-            self.assertEqual(source['audio_format_id'], '30216')
-            self.assertEqual(url, 'https://cdn.test/audio-30216')
+            self.assertEqual(m.resolve('BV1LwHv6LEYz')[0]['audio_format_id'], '30216')
+            source, url = m.resolve('BV1LwHv6LEYz', bilibili_audio_format='30232')
+            self.assertEqual(source['audio_format_id'], '30232')
+            self.assertEqual(url, 'https://cdn.test/audio-30232')
         result.stdout = json.dumps({'duration': 10, 'formats': formats[1:]})
+        with patch.object(m.subprocess, 'run', return_value=result):
+            self.assertEqual(m.resolve('BV1LwHv6LEYz')[0]['audio_format_id'], '30232')
         with patch.object(m.subprocess, 'run', return_value=result), self.assertRaises(m.Problem):
             m.resolve('BV1LwHv6LEYz', bilibili_audio_format='30216')
+
+    def test_preference_is_independent_of_extractor_order(self):
+        formats = [{'format_id': key, 'vcodec': 'none', 'acodec': 'mp4a.40.2',
+                    'url': 'https://cdn.test/audio-' + key} for key in ('30232', '30216')]
+        result = subprocess.CompletedProcess([], 0, json.dumps({'duration': 10, 'formats': formats}), '')
+        with patch.object(m.subprocess, 'run', return_value=result):
+            self.assertEqual(m.resolve('BV1LwHv6LEYz')[0]['audio_format_id'], '30216')
 
     def test_bilibili_format_option_rejects_other_platforms_or_invalid_values_before_network(self):
         with patch.object(m.subprocess, 'run', side_effect=AssertionError('no network')):
